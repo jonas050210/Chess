@@ -8,8 +8,9 @@ from .mcts import mcts_search
 
 
 class ReplayBuffer:
-    def __init__(self, capacity: int = 20000):
+    def __init__(self, capacity: int = 20000, rng=None):
         self.capacity = capacity
+        self.rng = rng or np.random.default_rng()
         self.data: list[dict] = []
 
     def add_game(self, records: list[dict]):
@@ -25,7 +26,7 @@ class ReplayBuffer:
                     np.zeros((0, ACTION_SIZE), dtype=np.float32),
                     np.zeros((0,), dtype=np.float32))
         batch = min(batch, n)
-        idx = np.random.default_rng().choice(n, size=batch, replace=False)
+        idx = self.rng.choice(n, size=batch, replace=False)
         rows = [self.data[int(i)] for i in idx]
         return (
             np.stack([r["x"] for r in rows]).astype(np.float32),
@@ -74,12 +75,24 @@ def play_selfplay_game(net, simulations: int = 20, max_plies: int = 80,
         env.step(mv)
         ply += 1
 
-    outcome = env.board.outcome(claim_draw=True)
-    if outcome is None or outcome.winner is None:
+    outcome = env.board.outcome(claim_draw=False)
+    if outcome is None:
+        # A training ply cap is not a drawn game. Bootstrap the value from the
+        # unfinished position; keep the flag for reporting/weighting later.
+        if list(env.board.legal_moves):
+            _, value = net.forward(env.tensor().ravel()[None], env.mask()[None])
+            estimate = float(value[0])
+        else:
+            estimate = 0.0
+        for r in records:
+            r["z"] = estimate if r["to_play"] == env.board.turn else -estimate
+            r["truncated"] = True
+    elif outcome.winner is None:
         for r in records:
             r["z"] = 0.0
+            r["truncated"] = False
     else:
-        by_color = {outcome.winner: 1.0, (not outcome.winner): -1.0}
         for r in records:
-            r["z"] = by_color[r["to_play"]]
+            r["z"] = 1.0 if r["to_play"] == outcome.winner else -1.0
+            r["truncated"] = False
     return records

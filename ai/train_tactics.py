@@ -18,8 +18,9 @@ from ai.baseline import BaselineBot
 from ai.env import ACTION_SIZE, board_to_tensor, legal_mask, move_to_index
 from ai.model import load_net
 from ai.tactics import detect_tactics
+from ai.train_paths import candidate_output
 
-DEFAULT_CKPT = os.path.join(ROOT, "checkpoints", "model.npz")
+DEFAULT_CKPT = os.path.join(ROOT, "checkpoints", "candidates", "tactics.npz")
 CURATED_MATES = [
     ("6k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 0 1", "a1a8"),
     ("7k/6pp/8/8/8/8/5PPP/R5K1 w - - 0 1", "a1a8"),
@@ -121,6 +122,12 @@ def main():
                     help="kuratierte Matt-in-1-Züge nach dem Training prüfen")
     ap.add_argument("--out", default=DEFAULT_CKPT)
     args = ap.parse_args()
+    args.out = candidate_output(ap, args.out, '.npz')
+    if (args.positions < 0 or args.mates < 0 or args.mate_repeat < 1 or
+            args.depth < 1 or args.epochs < 1 or args.max_seconds < 0):
+        ap.error("Invalid tactics position, depth, epoch or time budget")
+    if not 0 < args.lr <= .1:
+        ap.error("learning rate must be in (0, .1]")
 
     t0 = time.time()
     rng = random.Random(args.seed)
@@ -147,8 +154,8 @@ def main():
         samples.append((b, pi, z))
 
     if not samples:
-        print("keine Taktikpositionen gefunden")
-        return
+        print("No tactics positions found; no checkpoint was written", flush=True)
+        return 1
 
     X, M, PI, Z = [], [], [], []
     for b, pi, z in samples:
@@ -163,7 +170,7 @@ def main():
     best, bad, done = float("inf"), 0, 0
     for e in range(args.epochs):
         if args.max_seconds and time.time() - t0 > args.max_seconds:
-            print("max-seconds erreicht, breche Epochen ab", flush=True)
+            print("Time budget reached; stopping epochs", flush=True)
             break
         idx = np.random.default_rng(args.seed + e).permutation(len(X))
         loss = net.train_batch(X[idx], M[idx], PI[idx], Z[idx], lr=args.lr)
@@ -175,14 +182,17 @@ def main():
         else:
             bad += 1
         if args.target_loss and loss <= args.target_loss:
-            print(f"target-loss={args.target_loss} erreicht", flush=True)
+            print(f"target loss {args.target_loss} reached", flush=True)
             break
         if args.patience and bad >= args.patience:
-            print(f"patience={args.patience} erreicht", flush=True)
+            print(f"early-stopping patience {args.patience} reached", flush=True)
             break
+    if not done:
+        print("No epochs completed; no checkpoint was written", flush=True)
+        return 1
     net.save(args.out)
-    print(f"checkpoint: {args.out} | epochen={done}/{args.epochs} | "
-          f"loss={best:.4f} | taktik-positionen={len(X)} | "
+    print(f"checkpoint: {args.out} | epochs={done}/{args.epochs} | "
+          f"loss={best:.4f} | tactic_positions={len(X)} | "
           f"time={time.time()-t0:.1f}s")
 
     if args.mate_check:
@@ -199,8 +209,17 @@ def main():
             hits += int(ok)
             p = float(probs[0][target]) if target >= 0 else 0.0
             print(f"mate {uci}: {'OK' if ok else '—'} p={p:.3f}", flush=True)
-        print(f"mate_hit={hits}/{len(CURATED_MATES)}", flush=True)
+        print(f"mate_hit_on_training_examples={hits}/{len(CURATED_MATES)}", flush=True)
+        from ai.lessons import HOLDOUT
+        held = [lesson for lesson in HOLDOUT if lesson.skill == "mate"]
+        hits = 0
+        for lesson in held:
+            b = chess.Board(lesson.fen)
+            probs, _ = net.forward(board_to_tensor(b).ravel()[None], legal_mask(b)[None])
+            hits += int(np.argmax(probs[0]) == move_to_index(chess.Move.from_uci(lesson.move)))
+        print(f"mate_hit_heldout={hits}/{len(held)}", flush=True)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

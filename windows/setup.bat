@@ -1,6 +1,8 @@
 @echo off
+setlocal
 cd /d "%~dp0.."
-echo == Windows / Spielen vorbereiten ==
-python -m pip install -r requirements.txt
-echo Fertig. checkpoint-Ordner aus Ubuntu hierher kopieren (optional).
-pause
+if not exist ".venv\Scripts\python.exe" py -3 -m venv .venv
+if errorlevel 1 exit /b 1
+".venv\Scripts\python.exe" -m pip install -r requirements.txt
+if errorlevel 1 exit /b 1
+echo Ready. Run windows\start.bat to play in your browser.

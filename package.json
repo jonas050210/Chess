@@ -1,0 +1,13 @@
+{
+  "name": "chess-garden-web-tests",
+  "private": true,
+  "type": "module",
+  "description": "Local web game, browser interaction and vector-piece tests",
+  "scripts": {
+    "test:unit": "node --test tests/logic.test.js",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1"
+  }
+}

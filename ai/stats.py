@@ -20,6 +20,7 @@ class StatsTracker:
             self.game_reactions: list[float] = []
             self.game_rewards: list[float] = []
             self.result_recorded = False
+            self.last_result = None
             self.session_results = getattr(self, "session_results", Counter())
             self.session_bot_moves = getattr(self, "session_bot_moves", 0)
             self.session_user_moves = getattr(self, "session_user_moves", 0)
@@ -55,6 +56,27 @@ class StatsTracker:
                 self.session_reactions = self.session_reactions[-500:]
                 self.session_rewards = self.session_rewards[-500:]
 
+    def undo_moves(self, actors: list[str]):
+        """Roll back visible game/session move totals and bot reaction samples."""
+        with self.lock:
+            for actor in actors:
+                if actor == "bot":
+                    self.game_bot_moves = max(0, self.game_bot_moves - 1)
+                    self.session_bot_moves = max(0, self.session_bot_moves - 1)
+                    if self.game_reactions:
+                        self.game_reactions.pop()
+                    if self.session_reactions:
+                        self.session_reactions.pop()
+                    if self.game_rewards:
+                        self.game_reward -= self.game_rewards.pop()
+                    if self.session_rewards:
+                        self.session_reward -= self.session_rewards.pop()
+                elif actor == "user":
+                    self.game_user_moves = max(0, self.game_user_moves - 1)
+                    self.session_user_moves = max(0, self.session_user_moves - 1)
+            self.last_reaction_ms = self.session_reactions[-1] if self.session_reactions else 0.0
+            self.last_reward = self.session_rewards[-1] if self.session_rewards else 0.0
+
     def record_analysis(self, key, result: dict | None):
         if not result or key == self.last_analysis_key:
             return
@@ -69,11 +91,19 @@ class StatsTracker:
                 return
             self.result_recorded = True
             if winner is None:
-                self.session_results["draw"] += 1
-            elif (winner == "w" and bot_color == "w") or (winner == "b" and bot_color == "b"):
-                self.session_results["win"] += 1
+                self.last_result = "draw"
+            elif winner == bot_color:
+                self.last_result = "win"
             else:
-                self.session_results["loss"] += 1
+                self.last_result = "loss"
+            self.session_results[self.last_result] += 1
+
+    def undo_result(self):
+        with self.lock:
+            if self.result_recorded and self.last_result:
+                self.session_results[self.last_result] -= 1
+                self.result_recorded = False
+                self.last_result = None
 
     @staticmethod
     def _stats(values: list[float]):

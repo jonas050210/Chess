@@ -10,3 +10,7 @@ checkpoints/archive/
 *.log
 .DS_Store
 Thumbs.db
+node_modules/
+test-results/
+playwright-report/
+checkpoints/*.approved.json.tmp

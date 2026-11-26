@@ -8,10 +8,11 @@ from chess.polyglot import zobrist_hash
 from .env import board_to_tensor, legal_mask, legal_moves_with_indices, game_result
 
 
-def position_key(board: chess.Board) -> tuple[int, int, int, bool]:
-    """Key by position plus the history-dependent counters used in the network input."""
-    return (zobrist_hash(board), min(board.halfmove_clock, 100),
-            min(board.fullmove_number, 100), board.can_claim_threefold_repetition())
+def position_key(board: chess.Board) -> tuple[int, int, int, bool, bool]:
+    """Key by position, model inputs, and automatic repetition state."""
+    return (zobrist_hash(board), min(board.halfmove_clock, 150),
+            min(board.fullmove_number, 100), board.can_claim_threefold_repetition(),
+            board.is_repetition(4))
 
 
 class Node:
@@ -92,7 +93,7 @@ def mcts_search(board: chess.Board, net, simulations: int = 40,
                 rng=None, noise_eps: float = 0.0,
                 dirichlet_alpha: float = 0.3,
                 cache: dict | None = None,
-                root: Node | None = None):
+                root: Node | None = None, should_stop=None):
     if cache is None:
         cache = {}
     reused = False
@@ -107,12 +108,14 @@ def mcts_search(board: chess.Board, net, simulations: int = 40,
                noise_eps=noise_eps, dirichlet_alpha=dirichlet_alpha)
 
     for _ in range(max(1, int(simulations))):
+        if should_stop is not None and should_stop():
+            break
         node = root
         path = [node]
         while node.children:
             node = select_child(node, c_puct)
             path.append(node)
-        outcome = node.board.outcome(claim_draw=True)
+        outcome = node.board.outcome(claim_draw=False)
         if outcome is not None:
             z = game_result(node.board, node.board.turn)
             v = 0.0 if z is None else float(z)

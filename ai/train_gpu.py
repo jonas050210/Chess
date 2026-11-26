@@ -16,6 +16,7 @@ from ai.env import PLANES
 from ai.evaluate import evaluate_vs_baseline
 from ai.model import HAS_TORCH, TorchPolicyValueWrapper
 from ai.selfplay import ReplayBuffer, play_selfplay_game
+from ai.train_paths import candidate_output
 
 
 def main():
@@ -37,18 +38,26 @@ def main():
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--device", default=None)
     ap.add_argument("--resume", default=None)
-    ap.add_argument("--out", default=os.path.join(ROOT, "checkpoints", "model_torch.pt"))
+    ap.add_argument("--out", default=os.path.join(ROOT, "checkpoints", "candidates", "gpu.pt"))
     ap.add_argument("--save-every", type=int, default=10)
     ap.add_argument("--eval-every", type=int, default=10)
     ap.add_argument("--eval-games", type=int, default=4)
     ap.add_argument("--max-seconds", type=int, default=0, help="0 = unbegrenzt")
     args = ap.parse_args()
+    args.out = candidate_output(ap, args.out, '.pt')
+    if args.resume and (not os.path.isfile(args.resume) or not args.resume.endswith('.pt')):
+        ap.error("--resume must name an existing .pt checkpoint")
+    if any(value < 1 for value in (args.games, args.sims, args.max_plies, args.epochs,
+                                    args.train_every, args.batch, args.buffer,
+                                    args.channels, args.blocks, args.eval_games)):
+        ap.error("games, simulations, batch, architecture and training counts must be positive")
+    if args.max_seconds < 0 or not 0 < args.lr <= .1:
+        ap.error("Invalid time budget or learning rate")
 
     if not HAS_TORCH:
-        print("PyTorch fehlt. Auf Ubuntu zuerst:")
-        print("  pip3 install torch --index-url https://download.pytorch.org/whl/cu121")
-        print("  pip3 install -r requirements-gpu.txt")
-        return
+        print("PyTorch is not installed. Install a build compatible with your GPU/driver,")
+        print("then install requirements-gpu.txt before training a Torch candidate.")
+        return 1
 
     import torch
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -66,8 +75,9 @@ def main():
     opt = torch.optim.Adam(net.net.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.StepLR(opt, step_size=args.lr_step, gamma=args.lr_gamma)
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
-    buf = ReplayBuffer(capacity=args.buffer)
     rng = np.random.default_rng(args.seed)
+    torch.manual_seed(args.seed)
+    buf = ReplayBuffer(capacity=args.buffer, rng=rng)
 
     def train_steps(n: int) -> float:
         net.net.train()
@@ -99,6 +109,7 @@ def main():
         return sum(losses) / len(losses) if losses else 0.0
 
     t0 = time.time()
+    played = 0
     for g in range(args.games):
         if args.max_seconds and time.time() - t0 > args.max_seconds:
             print("max-seconds erreicht, breche ab")
@@ -106,6 +117,7 @@ def main():
         recs = play_selfplay_game(net, simulations=args.sims,
                                   max_plies=args.max_plies, rng=rng, noise_eps=0.25)
         buf.add_game(recs)
+        played += 1
         print(f"[game {g+1:>3}/{args.games}] pos={len(recs):>3} buffer={len(buf.data):>5} "
               f"lr={sched.get_last_lr()[0]:.2e}", flush=True)
 
@@ -119,10 +131,14 @@ def main():
             net.save(step_path)
             print(f"          saved {step_path}", flush=True)
 
+    if not played or not buf.data:
+        print("No self-play samples; no checkpoint was written", flush=True)
+        return 1
     net.save(args.out)
     print(f"saved  {args.out}")
     print(f"time   {time.time() - t0:.1f}s | buffer={len(buf.data)}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

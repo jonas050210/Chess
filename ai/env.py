@@ -150,7 +150,7 @@ def legal_mask(board: chess.Board) -> np.ndarray:
 
 
 def game_result(board: chess.Board, perspective: bool) -> float | None:
-    outcome = board.outcome(claim_draw=True)
+    outcome = board.outcome(claim_draw=False)
     if outcome is None:
         return None
     if outcome.winner is None:
@@ -187,4 +187,4 @@ class ChessEnv:
 
     @property
     def done(self) -> bool:
-        return self.board.is_game_over(claim_draw=True)
+        return self.board.is_game_over(claim_draw=False)
