@@ -5,6 +5,7 @@ import math
 import os
 import threading
 import time
+from urllib.parse import urlsplit
 
 import chess
 from chess.polyglot import zobrist_hash
@@ -18,6 +19,9 @@ from ai.stats import stats
 import ai.bot as bot_mod
 
 LOW_RAM = os.environ.get("CHESS_LOW_RAM") == "1"
+# Loopback is the safe default: this API has no authentication. Set CHESS_HOST=0.0.0.0
+# only when LAN access is intentional and the host is protected by a firewall.
+HOST = os.environ.get("CHESS_HOST", "127.0.0.1")
 if LOW_RAM:
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     SIMS.update({1: 4, 2: 8, 3: 12, 4: 16, 5: 24})
@@ -34,6 +38,26 @@ TORCH_CKPT = os.path.join(ROOT, "checkpoints", "model_torch.pt")
 
 app = Flask(__name__, static_folder=None)
 app.config["JSON_SORT_KEYS"] = False
+
+
+@app.before_request
+def protect_local_api():
+    # The browser UI and Tk client use JSON. Reject simple form posts and cross-origin
+    # browser requests to reduce localhost CSRF/DNS-rebinding exposure.
+    if request.method != "POST":
+        return None
+    if request.mimetype != "application/json":
+        return jsonify({"error": "Content-Type must be application/json"}), 415
+    if HOST in ("127.0.0.1", "localhost", "::1"):
+        host = urlsplit(f"//{request.host}").hostname
+        if host not in {"localhost", "127.0.0.1", "::1"}:
+            return jsonify({"error": "Invalid Host"}), 400
+    origin = request.headers.get("Origin")
+    if origin and origin.rstrip("/") != request.host_url.rstrip("/"):
+        return jsonify({"error": "Cross-origin request rejected"}), 403
+    return None
+
+
 bot = AIBot(checkpoint=NP_CKPT, torch_checkpoint=TORCH_CKPT if HAS_TORCH else None)
 fallback = BaselineBot()
 
@@ -91,7 +115,7 @@ class Session:
         now = time.time()
         dt = now - self.last_tick
         self.last_tick = now
-        if self.started and not self._finished():
+        if self.clock_started and not self._finished():
             key = "w" if self.board.turn == chess.WHITE else "b"
             self.clocks[key] = max(0.0, self.clocks[key] - dt)
             if self.clocks[key] <= 0:
@@ -100,11 +124,13 @@ class Session:
                 self.bot_pending = False
                 self.premove = None
 
-    def _apply(self, move: chess.Move):
+    def _apply(self, move: chess.Move) -> bool:
         self._tick()
+        if self._finished():
+            return False
         mover = "w" if self.board.turn == chess.WHITE else "b"
         san = self.board.san(move)
-        elapsed = time.time() - self.last_move_started_at if self.started else 0.0
+        elapsed = time.time() - self.last_move_started_at if self.clock_started else 0.0
         self.board.push(move)
         self.clocks[mover] = max(0.0, self.clocks[mover] + self.increment)
         self.move_history.append(move)
@@ -115,6 +141,7 @@ class Session:
         self.started = True
         self.last_tick = time.time()
         self.last_move_started_at = time.time()
+        return True
 
     def _find_move(self, frm: str, to: str, promo_char: str = "q"):
         try:
@@ -156,7 +183,7 @@ class Session:
         before = board_meta(self.board)["material_balance"]
         t0 = time.perf_counter()
         t_wall = time.time()
-        mv = bot.choose_move(self.board.copy(stack=False), self.difficulty)
+        mv = bot.choose_move(self.board.copy(stack=True), self.difficulty)
         dt = time.perf_counter() - t0
         started_at = getattr(self, "bot_requested_at", None) or t_wall
         reaction = max(dt, time.time() - started_at)
@@ -168,7 +195,8 @@ class Session:
         if mv is None:
             return None
         uci = mv.uci()
-        self._apply(mv)
+        if not self._apply(mv):
+            return None
         after = board_meta(self.board)["material_balance"]
         persp = 1.0 if self.bot_color == chess.WHITE else -1.0
         reward = math.tanh(((after - before) * persp) / 5.0) - min(dt, 2.0) * 0.01
@@ -190,8 +218,7 @@ class Session:
                 pm = self.premove
                 self.premove = None
                 mv = self._find_move(pm["from"], pm["to"], pm.get("promotion", "q"))
-                if mv is not None and self.board.is_legal(mv):
-                    self._apply(mv)
+                if mv is not None and self.board.is_legal(mv) and self._apply(mv):
                     stats.record_user_move()
             self._schedule_bot()
 
@@ -244,6 +271,7 @@ class Session:
             self.move_history: list[chess.Move] = []
             self.san_history: list[str] = []
             self.started = False
+            self.clock_started = True
             self.last_tick = time.time()
             self.bot_enabled = bool(bot_enabled)
             self.bot_pending = False
@@ -311,6 +339,7 @@ class Session:
                 "last_bot_move": self.last_bot_move,
                 "think_delay": self.think_delay,
                 "started": self.started,
+                "clock_started": self.clock_started,
                 "time_control": self.time_control,
                 "increment": self.increment,
                 "premove": self.premove_uci(),
@@ -347,7 +376,7 @@ analysis_state = {"key": None, "fen": None, "result": None,
 def analysis_loop():
     while True:
         with session.lock:
-            board = session.board.copy(stack=False)
+            board = session.board.copy(stack=True)
             key = zobrist_hash(board)
             finished = session._finished()
         if finished:
@@ -459,6 +488,7 @@ def api_move():
     frm, to = d.get("from", ""), d.get("to", "")
     promo_char = str(d.get("promotion", "q") or "q").lower()
     with session.lock:
+        session._tick()
         if session._finished():
             return jsonify({"error": "Partie beendet"}), 400
         if session.bot_enabled and session.board.turn != session.you:
@@ -469,7 +499,8 @@ def api_move():
         move = session._find_move(frm, to, promo_char)
         if move is None:
             return jsonify({"error": "illegaler Zug"}), 400
-        session._apply(move)
+        if not session._apply(move):
+            return jsonify({"error": "Zeit abgelaufen"}), 400
         stats.record_user_move()
         session._schedule_bot()
     return jsonify(session.state({"your_move": move.uci()}))
@@ -495,7 +526,7 @@ def api_hint():
     with session.lock:
         if session._finished():
             return jsonify({"error": "Partie beendet"}), 400
-        mv = bot.hint(session.board.copy(stack=False), session.difficulty)
+        mv = bot.hint(session.board.copy(stack=True), session.difficulty)
         if mv is None or not session.board.is_legal(mv):
             return jsonify({"error": "kein Zug"}), 400
         return jsonify({"uci": mv.uci(), "san": session.board.san(mv)})
@@ -566,7 +597,7 @@ def api_agree_draw():
 
 def bot_accepts_draw() -> bool:
     with session.lock:
-        board = session.board.copy(stack=False)
+        board = session.board.copy(stack=True)
         key = zobrist_hash(board)
         meta = board_meta(board)
         bot_white = session.bot_color == chess.WHITE
@@ -627,5 +658,5 @@ else:
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    print(f"Chess Bot v6.2 · low_ram={LOW_RAM} sims={SIMS} analysis={'off' if LOW_RAM else 'on'}")
-    app.run(host="0.0.0.0", port=port, threaded=not LOW_RAM, debug=False)
+    print(f"Chess Bot v6.2 · host={HOST} low_ram={LOW_RAM} sims={SIMS} analysis={'off' if LOW_RAM else 'on'}")
+    app.run(host=HOST, port=port, threaded=not LOW_RAM, debug=False)

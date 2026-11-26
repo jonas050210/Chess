@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 import sys
 import chess
 
@@ -35,8 +36,9 @@ class BaselineAgent:
         return self.bot.choose_move(board, self.level)
 
 
-def play_game(white, black, max_plies: int = 200):
-    board = chess.Board()
+def play_game(white, black, max_plies: int = 200,
+              board: chess.Board | None = None):
+    board = board.copy(stack=True) if board is not None else chess.Board()
     for _ in range(max_plies):
         if board.is_game_over(claim_draw=True):
             break
@@ -49,29 +51,48 @@ def play_game(white, black, max_plies: int = 200):
 
 
 def evaluate_vs_baseline(net, games: int = 8, sims: int = 25,
-                         level: int = 2, max_plies: int = 160) -> dict:
+                         level: int = 2, max_plies: int = 160,
+                         seed: int = 7) -> dict:
+    """Evaluate on reproducible, varied openings and alternate the candidate's color."""
     mcts = MCTSAgent(net, sims)
     base = BaselineAgent(level)
+    rng = random.Random(seed)
     res = {"win": 0, "draw": 0, "loss": 0}
+    scores = []
     for g in range(games):
+        opening = chess.Board()
+        for _ in range(4 + 2 * rng.randrange(3)):
+            if opening.is_game_over(claim_draw=True):
+                break
+            opening.push(rng.choice(list(opening.legal_moves)))
         if g % 2 == 0:
-            winner = play_game(mcts, base, max_plies)
-            if winner is chess.WHITE:
-                res["win"] += 1
-            elif winner is chess.BLACK:
-                res["loss"] += 1
-            else:
-                res["draw"] += 1
+            winner = play_game(mcts, base, max_plies, opening)
+            won = winner is chess.WHITE
+            lost = winner is chess.BLACK
         else:
-            winner = play_game(base, mcts, max_plies)
-            if winner is chess.BLACK:
-                res["win"] += 1
-            elif winner is chess.WHITE:
-                res["loss"] += 1
-            else:
-                res["draw"] += 1
-    n = max(1, games)
-    res["score"] = round((res["win"] + 0.5 * res["draw"]) / n, 3)
+            winner = play_game(base, mcts, max_plies, opening)
+            won = winner is chess.BLACK
+            lost = winner is chess.WHITE
+        if won:
+            res["win"] += 1
+            scores.append(1.0)
+        elif lost:
+            res["loss"] += 1
+            scores.append(0.0)
+        else:
+            res["draw"] += 1
+            scores.append(0.5)
+    n = len(scores)
+    mean = sum(scores) / n if n else 0.0
+    if n > 1:
+        variance = sum((x - mean) ** 2 for x in scores) / (n - 1)
+        margin = 1.96 * (variance / n) ** 0.5
+    else:
+        margin = 1.0
+    res["score"] = round(mean, 3)
+    res["score_lower95"] = round(max(0.0, mean - margin), 3)
+    res["score_upper95"] = round(min(1.0, mean + margin), 3)
+    res["game_scores"] = scores
     return res
 
 

@@ -8,7 +8,7 @@ Ja, das geht. Der Server braucht **keine GPU** zum Spielen; die GPU wird nur bei
 cd chess-ai
 pip3 install torch --index-url https://download.pytorch.org/whl/cu121   # passend zum Treiber
 pip3 install -r requirements-gpu.txt
-bash ubuntu/train.sh --preset auto --games 200 --eval-games 16 --max-seconds 3600
+bash ubuntu/train.sh --preset auto --games 200 --eval-games 32 --max-seconds 3600
 # Kandidaten + Gate; nur bei bestandenem Gate wird model_torch.pt / model.npz ersetzt
 # CPU-Fallback: python3 ai/train_cli.py --preset cpu --max-seconds 600
 ```
