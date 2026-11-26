@@ -1,6 +1,6 @@
 # Chess Garden
 
-A **browser-only, local chess game** with friendly, Duolingo-inspired (not Duolingo-branded) design, original crisp SVG pieces, a rule-authoritative Python server, and **terminal-only** bot training. There is no Tkinter app, training button, CDN, external image/font, account, or cloud engine.
+A **browser-only, local chess game** with friendly, Duolingo-inspired (not Duolingo-branded) design, original faceless Staunton-inspired SVG pieces, a rule-authoritative Python server, and **terminal-only** bot training. There is no Tkinter app, training button, CDN, external image/font, account, or cloud engine.
 
 ![Real browser screenshot of Chess Garden](docs/web-preview.png)
 

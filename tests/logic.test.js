@@ -62,6 +62,24 @@ test('the twelve pieces are distinct self-contained vector images', () => {
   assert.throws(() => pieceSvg('x'), TypeError);
 });
 
+test('board figures and decorative pawns have no drawn eyes or faces', () => {
+  for (const symbol of ['P', 'p']) {
+    // A pawn has one circle for its round head, never two tiny eye dots.
+    assert.equal((pieceSvg(symbol).match(/<circle\b/g) || []).length, 1);
+  }
+  for (const symbol of ['N', 'n']) {
+    // The horse has a recognizable silhouette and mane, but no facial marks.
+    assert.equal((pieceSvg(symbol).match(/<circle\b/g) || []).length, 0);
+  }
+  const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
+  for (const element of ['brand-mark', 'coach-icon']) {
+    const illustration = html.match(new RegExp(`class="${element}"[\\s\\S]*?<\\/svg>`))?.[0];
+    assert.ok(illustration, `missing ${element} illustration`);
+    assert.equal((illustration.match(/<circle\b/g) || []).length, 2,
+                 `${element}: background and head only, no eye dots`);
+  }
+});
+
 test('web entry point is browser-only and self-hosted', () => {
   const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
   assert.ok(html.includes('/static/app.js'));

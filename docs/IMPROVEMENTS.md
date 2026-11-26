@@ -2,7 +2,7 @@
 
 ## Current design
 
-- Replaced the three Tk windows, ZIP of low-resolution PNG pieces, and schematic preview with a responsive web-first game, original scalable SVG chess art, real browser screenshot, and self-hosted assets.
+- Replaced the three Tk windows, ZIP of low-resolution PNG pieces, and schematic preview with a responsive web-first game, original faceless Staunton-inspired SVG chess art, real browser screenshot, and self-hosted assets.
 - Rules stay in `python-chess`. Claimable draws do not auto-end games; bot-game claims require the human's turn; draw agreements require an actual opponent's offer; captured-piece displays follow actual captures rather than miscounting promoted pawns; invalid JSON types return 400 instead of 500. The left panel is a **monotonic, cumulative stopwatch**, not a countdown; undo rewinds moves but not elapsed real time.
 - Per-browser in-memory games, same-origin checks, sessionStorage fallback for embedded previews; async bot/analysis outside the game lock, with stale search results discarded after undo/new. **No premoves** while the bot thinks; reloading and New game both reset to the starting board. Fullscreen keeps the time panel with the board.
 - Reliable alpha-beta playing search at its strongest built-in level by default; check-aware quiescence, mate scoring, king safety and pawn structure. Model activation requires a SHA-256 receipt for a passed **level-5** gate from the terminal trainer.
