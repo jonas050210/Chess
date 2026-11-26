@@ -4,10 +4,8 @@ from __future__ import annotations
 import os
 import numpy as np
 import chess
-from chess.polyglot import zobrist_hash
-
 from .model import HAS_TORCH, load_net
-from .mcts import mcts_search, best_move
+from .mcts import mcts_search, best_move, position_key
 from .baseline import BaselineBot
 
 SIMS = {1: 8, 2: 20, 3: 40, 4: 80, 5: 150}
@@ -48,9 +46,9 @@ class AIBot:
     def _reusable_root(self, board: chess.Board):
         if self._root is None or not self._root.children:
             return None
-        key = zobrist_hash(board)
+        key = position_key(board)
         for child in self._root.children:
-            if zobrist_hash(child.board) == key:
+            if position_key(child.board) == key:
                 child.parent = None
                 return child
         return None

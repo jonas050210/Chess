@@ -32,7 +32,7 @@ constraints:
 honesty:
   tested: rules, API, UI, drag, animation, settings sync, low-RAM mode, training pipeline
   not_proven: strong playing strength; short CPU runs are smoke tests only
-repo_size: about 4 MB, about 41 files
+repo_size: about 4 MB, about 44 files
 version: v6.2
 ```
 
@@ -59,6 +59,8 @@ version: v6.2
 ## 3. Quick start
 
 ### Windows
+
+PowerShell clone, install, play, test, and training commands: [`docs/POWERSHELL_WINDOWS.md`](docs/POWERSHELL_WINDOWS.md).
 
 1. Install Python 3.10+ from python.org. Enable **"tcl/tk and IDLE"** and the **py launcher**.
 2. In the `chess-ai` folder:
@@ -99,6 +101,8 @@ PORT=8001 CHESS_PORT=8001 python3 main.py
 ```
 
 Windows equivalent: `set PORT=8001` and `set CHESS_PORT=8001` before starting.
+
+The API binds to `127.0.0.1` by default. It has no authentication; keep that default unless you intentionally need LAN access. To expose it on a trusted, firewalled network only, set `CHESS_HOST=0.0.0.0` before starting the server.
 
 ---
 
@@ -153,7 +157,7 @@ Key API endpoints: `/api/state`, `/api/new`, `/api/move`, `/api/undo`, `/api/hin
 python3 ai/train_cli.py --help
 python3 ai/train_cli.py --dry-run
 python3 ai/train_cli.py --preset cpu --max-seconds 300 --no-promote
-bash ubuntu/train.sh --preset auto --max-seconds 1800 --eval-games 12
+bash ubuntu/train.sh --preset auto --max-seconds 1800 --eval-games 32
 ```
 
 Windows:
@@ -167,7 +171,7 @@ With an NVIDIA GPU on Ubuntu:
 ```bash
 pip3 install torch --index-url https://download.pytorch.org/whl/cu121
 pip3 install -r requirements-gpu.txt
-bash ubuntu/train.sh --preset auto --games 200 --gpu-sims 60 --eval-games 16 --max-seconds 3600
+bash ubuntu/train.sh --preset auto --games 200 --gpu-sims 60 --eval-games 32 --max-seconds 3600
 ```
 
 Every run writes **candidates** to `checkpoints/candidates/`, a JSON report, and archives the active model before a promotion. `model.npz` / `model_torch.pt` are never overwritten directly. Without `--no-promote`, a candidate replaces the active model only after a positive Arena gate.
@@ -229,11 +233,22 @@ Deleted: `uploads/`, `image-search/`, loose piece PNGs/SVGs, `assets/pieces_svg/
 
 Kept: one ZIP, one preview PNG, one model checkpoint, source, docs, dev tools, starters, requirements, `.gitignore`.
 
-Current repository: about **4 MB**, about **41 files**, 0 external references in `web/index.html`, 0 loose piece PNGs.
+Current repository: about **4 MB**, about **44 files**, 0 external references in `web/index.html`, 0 loose piece PNGs.
 
 ---
 
-## 11. Verification already run
+## 11. Verification
+
+Run the maintained regression suite (CPU/low-RAM mode; no GUI required):
+
+```bash
+CHESS_LOW_RAM=1 python3 -m unittest discover -s tests -v
+python3 -m compileall -q ai server.py main.py tools tests
+```
+
+The suite covers clock start/flag fall, MCTS cache identity, paired Arena comparisons, and safe checkpoint replacement. GitHub Actions runs it on Python 3.10 and 3.12.
+
+Previously performed manual checks:
 
 - `python3 -m py_compile ai/*.py server.py main.py tools/*.py`
 - `node --check tools/generate_assets.js` and extracted browser JS

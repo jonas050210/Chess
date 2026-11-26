@@ -8,6 +8,12 @@ from chess.polyglot import zobrist_hash
 from .env import board_to_tensor, legal_mask, legal_moves_with_indices, game_result
 
 
+def position_key(board: chess.Board) -> tuple[int, int, int, bool]:
+    """Key by position plus the history-dependent counters used in the network input."""
+    return (zobrist_hash(board), min(board.halfmove_clock, 100),
+            min(board.fullmove_number, 100), board.can_claim_threefold_repetition())
+
+
 class Node:
     __slots__ = ("board", "parent", "move", "index", "prior", "children", "N", "W")
 
@@ -30,7 +36,7 @@ def expand(node: Node, net, cache: dict | None = None, rng=None,
     pairs = legal_moves_with_indices(node.board)
     if not pairs:
         return 0.0
-    key = zobrist_hash(node.board)
+    key = position_key(node.board)
     if cache is not None and key in cache:
         probs_row, v = cache[key]
         probs = probs_row.reshape(1, -1)
@@ -50,7 +56,7 @@ def expand(node: Node, net, cache: dict | None = None, rng=None,
     priors = priors / s if s > 0 else np.ones_like(priors) / len(pairs)
 
     for (mv, idx), p in zip(pairs, priors):
-        cb = node.board.copy(stack=False)
+        cb = node.board.copy(stack=True)
         cb.push(mv)
         node.children.append(Node(cb, node, mv, idx, float(p)))
     return v
@@ -90,13 +96,13 @@ def mcts_search(board: chess.Board, net, simulations: int = 40,
     if cache is None:
         cache = {}
     reused = False
-    if root is not None and zobrist_hash(root.board) == zobrist_hash(board):
+    if root is not None and position_key(root.board) == position_key(board):
         reused = True
         root.parent = None
         if not root.children:
             expand(root, net, cache=cache)
     else:
-        root = Node(board.copy(stack=False), None, None, -1, 0.0)
+        root = Node(board.copy(stack=True), None, None, -1, 0.0)
         expand(root, net, cache=cache, rng=rng,
                noise_eps=noise_eps, dirichlet_alpha=dirichlet_alpha)
 

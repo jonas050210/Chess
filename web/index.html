@@ -323,7 +323,7 @@ const DEMO={
   status:"playing",winner:null,check:false,check_square:null,
   captured:{w:[],b:[]},clocks:{w:600,b:600},you_color:"w",bot_color:"b",
   difficulty:3,bot_enabled:true,bot_thinking:false,last_bot_move:null,think_delay:0.6,
-  started:false,time_control:600,
+  started:false,clock_started:false,time_control:600,
   rules:{castling:"KQkq",ep_square:null,halfmove_clock:0,fullmove_number:1,legal_count:20,
     in_check:false,can_claim_threefold:false,can_claim_fifty:false,insufficient_material:false,
     repetition_2:false,material_balance:0,phase:"Eröffnung"},
@@ -486,8 +486,8 @@ function renderClocks(){
   const {top,bottom}=playerColors(),active=["playing","check"].includes(state.status);
   const ct=$("clockTop"),cb=$("clockBottom");
   ct.textContent=fmt(localClocks[top]);cb.textContent=fmt(localClocks[bottom]);
-  ct.classList.toggle("active",active&&state.started&&state.turn===top);
-  cb.classList.toggle("active",active&&state.started&&state.turn===bottom);
+  ct.classList.toggle("active",active&&state.clock_started&&state.turn===top);
+  cb.classList.toggle("active",active&&state.clock_started&&state.turn===bottom);
 }
 function renderBars(){
   const {top,bottom}=playerColors();
@@ -774,7 +774,7 @@ $("premove").onchange=()=>{premoveOn=$("premove").checked;sendConfig();};
 setInterval(()=>{
   if(!state||busy)return;
   const now=performance.now(),dt=(now-lastSync)/1000;lastSync=now;
-  if(state.started&&["playing","check"].includes(state.status)){
+  if(state.clock_started&&["playing","check"].includes(state.status)){
     localClocks[state.turn]=Math.max(0,(localClocks[state.turn]||0)-dt);renderClocks();
   }
 },250);

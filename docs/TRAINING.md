@@ -7,8 +7,8 @@
 | Vorher | Jetzt |
 |---|---|
 | `train.sh` überschreibt `model.npz` direkt | Kandidaten unter `checkpoints/candidates/`, aktives Modell bleibt geschützt |
-| Kein Gate | Arena vs. Baseline + `--min-score` / `--min-delta` vor Promotion |
-| Fehler/Abbruch mittendrin ⇒ halber Checkpoint | JSON-Report, Archiv-Kopie, atomare `copy2`-Promotion |
+| Unsicheres Gate mit wenigen Spielen | gepaarte Partien mit denselben reproduzierbaren Eröffnungen; mindestens 12 Spiele und 95%-Untergrenzen für Score und Zugewinn |
+| Fehler/Abbruch während Promotion | Archiv-Kopie, temporäre Datei und atomares `os.replace` |
 | Feste lange Läufe | `--max-seconds`, `--dry-run`, Presets, `--no-promote` |
 | Seeds nur pro Skript | ein `--seed` wird konsistent an Smoke/Taktik/GPU weitergegeben |
 | Kein Early-Stopping | `--target-loss`, `--patience`, `--mate-check` in `train_tactics.py` |
@@ -37,16 +37,16 @@ python3 ai/train_cli.py --preset cpu --max-seconds 120 --no-promote
 
 # 3) Ernsthafter Ubuntu-Lauf mit CUDA
 bash ubuntu/train.sh --preset auto --games 200 --gpu-sims 60 \
-  --tactics-epochs 180 --eval-games 16 --min-score 0.60 --min-delta 0.05
+  --tactics-epochs 180 --eval-games 32 --min-score 0.60 --min-delta 0.05
 
 # 4) Nur Stärke prüfen
-python3 ai/train_cli.py --preset eval --eval-games 12 --eval-sims 30 --baseline-level 2
+python3 ai/train_cli.py --preset eval --eval-games 32 --eval-sims 30 --baseline-level 2
 
 # 5) Windows-Terminal (CPU)
 windows\train.bat --preset cpu --max-seconds 300 --no-promote
 ```
 
-Wichtige Flags: `--device auto|cpu|cuda`, `--seed`, `--max-seconds`, `--resume`, `--out`, `--report`, `--min-score`, `--min-delta`, `--target-loss`, `--patience`, `--mate-check` (immer aktiv im CLI), `--no-promote`, `--strict`.
+Wichtige Flags: `--device auto|cpu|cuda`, `--seed`, `--eval-seed` (reproduzierbare Opening-Auswahl), `--eval-games` (Default 32), `--max-seconds`, `--resume`, `--out`, `--report`, `--min-score`, `--min-delta`, `--target-loss`, `--patience`, `--mate-check` (immer aktiv im CLI), `--no-promote`, `--strict`. Promotion benötigt mindestens 12 gepaarte Partien; sowohl die untere 95%-Konfidenzgrenze des Kandidaten-Scores als auch die des gepaarten Zugewinns müssen das Gate bestehen.
 
 ## Dateien
 
@@ -89,7 +89,7 @@ Basis ist der gemessene Lauf oben: 3 Selfplay-Games/16 Sims = 3,0 s, 197 Taktik-
 | M0 | UI/Regeln/API laufen | 0 s (fertig) | 0 s (fertig) | `windows\lowram.bat` |
 | M1 | Smoke-Checkpoint + `mate_hit=4/4` | 1–3 min | 0,5–2 min | `--preset cpu --max-seconds 180` |
 | M2 | Taktik stabil: `loss<2.0`, 120 Epochen, 3 Seeds | 5–15 min | 3–8 min (GPU hilft kaum, NumPy) | `--preset tactics --tactics-epochs 120` |
-| M3 | 40–100 Selfplay-Games, erste Arena > Baseline Lvl 1 (≥0,55 / 16 Spiele) | 30–90 min, nicht empfohlen | 15–45 min | `--preset auto --games 100 --eval-games 16` |
+| M3 | 40–100 Selfplay-Games, erste Arena > Baseline Lvl 1 (≥0,55 / 32 gepaarte Spiele) | 30–90 min, nicht empfohlen | 15–45 min | `--preset auto --games 100 --eval-games 32` |
 | M4 | Arena > Baseline Lvl 2/3 (≥0,60 / 32 Spiele) | viele Stunden bis Tage | 2–6 h | `--games 400 --gpu-sims 60 --eval-games 32` |
 | M5 | „spürbar starke KI“ (konsistent gegen stärkere Gegner) | nicht realistisch | Tage + Code-Umbau | Batched MCTS, ResNet, League, Millionen Positionen |
 

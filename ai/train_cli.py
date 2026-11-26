@@ -12,7 +12,7 @@ Beispiele:
   python3 ai/train_cli.py --help
   python3 ai/train_cli.py --dry-run
   python3 ai/train_cli.py --preset cpu --max-seconds 300
-  bash ubuntu/train.sh --preset auto --games 200 --eval-games 12
+  bash ubuntu/train.sh --preset auto --games 200 --eval-games 32
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -100,8 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--blocks", type=int, default=4)
 
     # Arena-Gate
-    ap.add_argument("--eval-games", type=int, default=8)
+    ap.add_argument("--eval-games", type=int, default=32,
+                    help="paired Arena games; promotion requires at least 12")
     ap.add_argument("--eval-sims", type=int, default=25)
+    ap.add_argument("--eval-seed", type=int, default=1701,
+                    help="same reproducible opening set for active and candidate")
     ap.add_argument("--baseline-level", type=int, default=2)
     ap.add_argument("--min-score", type=float, default=0.55)
     ap.add_argument("--min-delta", type=float, default=0.05)
@@ -176,16 +180,44 @@ def run_step(cmd: list[str], strict: bool) -> int:
         return e.returncode
 
 
-def arena_score(path: Path | None, games: int, sims: int, level: int) -> dict:
+def atomic_copy(src: Path, dst: Path) -> None:
+    """Copy beside the destination, then atomically replace it on the same filesystem."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{dst.name}.", suffix=".tmp", dir=dst.parent)
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def arena_score(path: Path | None, games: int, sims: int, level: int,
+                seed: int = 7) -> dict:
     from ai.evaluate import evaluate_vs_baseline
     from ai.model import load_net
     p = str(path) if path and path.exists() else None
     net = load_net(p)
-    r = evaluate_vs_baseline(net, games=games, sims=sims, level=level)
+    r = evaluate_vs_baseline(net, games=games, sims=sims, level=level, seed=seed)
     r["checkpoint"] = p or "random"
     print(f"ARENA {r['checkpoint']}: +{r['win']} ={r['draw']} -{r['loss']} "
           f"score={r['score']}", flush=True)
     return r
+
+
+def paired_delta(candidate: dict, current: dict) -> tuple[float, float, int]:
+    """Return paired mean score gain, conservative 95% lower bound, sample count."""
+    a = candidate.get("game_scores", [])
+    b = current.get("game_scores", [])
+    n = min(len(a), len(b))
+    if n < 2:
+        return 0.0, float("-inf"), n
+    diffs = [float(a[i]) - float(b[i]) for i in range(n)]
+    mean = sum(diffs) / n
+    variance = sum((x - mean) ** 2 for x in diffs) / (n - 1)
+    lower = mean - 1.96 * (variance / n) ** 0.5
+    return mean, lower, n
 
 
 def main() -> int:
@@ -268,15 +300,18 @@ def main() -> int:
     active_pt = ACTIVE_PT if ACTIVE_PT.exists() and HAS_TORCH else None
     active = active_pt or (ACTIVE_NPZ if ACTIVE_NPZ.exists() else None)
     print("\n-- Arena-Gate --", flush=True)
-    current = arena_score(active, a.eval_games, a.eval_sims, a.baseline_level)
+    current = arena_score(active, a.eval_games, a.eval_sims, a.baseline_level,
+                          seed=a.eval_seed)
     report["current"] = current
 
     trained = []
     if any(s in steps for s in ("smoke", "tactics")) and npz.exists():
-        r = arena_score(npz, a.eval_games, a.eval_sims, a.baseline_level)
+        r = arena_score(npz, a.eval_games, a.eval_sims, a.baseline_level,
+                        seed=a.eval_seed)
         trained.append((npz, r))
     if "gpu" in steps and pt.exists() and HAS_TORCH:
-        r = arena_score(pt, a.eval_games, a.eval_sims, a.baseline_level)
+        r = arena_score(pt, a.eval_games, a.eval_sims, a.baseline_level,
+                        seed=a.eval_seed)
         trained.append((pt, r))
     for path, r in trained:
         report["candidates"].append({"path": str(path), **r})
@@ -284,22 +319,36 @@ def main() -> int:
     promoted_path = None
     reason = "kein Kandidat" if not trained else "no-promote gesetzt"
     if trained and not a.no_promote:
-        best_path, best = max(trained, key=lambda x: x[1]["score"])
-        ok = (best["score"] >= a.min_score and
-              best["score"] >= current["score"] + a.min_delta)
+        best_path, best = max(trained, key=lambda x: x[1].get("score_lower95", 0.0))
+        delta, delta_lower95, paired_games = paired_delta(best, current)
+        report["gate"] = {
+            "paired_games": paired_games,
+            "mean_delta": round(delta, 3),
+            "delta_lower95": round(delta_lower95, 3) if paired_games >= 2 else None,
+            "candidate_score_lower95": best.get("score_lower95", 0.0),
+            "min_games": 12,
+            "min_score": a.min_score,
+            "min_delta": a.min_delta,
+        }
+        ok = (paired_games >= 12
+              and best.get("score_lower95", 0.0) >= a.min_score
+              and delta_lower95 >= a.min_delta)
         if best_path.suffix == ".npz" and active_pt:
             ok, reason = False, "Torch-Checkpoint hat Vorrang; NumPy-Kandidat nicht aktiviert"
         elif not ok:
-            reason = (f"Gate nicht bestanden: score={best['score']} "
-                      f"< min={a.min_score} oder Δ<{a.min_delta}")
+            reason = (f"Gate nicht bestanden: games={paired_games}/12, "
+                      f"candidate lower95={best.get('score_lower95', 0.0)} "
+                      f"(min {a.min_score}), paired Δ lower95="
+                      f"{round(delta_lower95, 3) if paired_games >= 2 else 'n/a'} "
+                      f"(min {a.min_delta})")
         if ok:
             target = ACTIVE_PT if best_path.suffix == ".pt" else ACTIVE_NPZ
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             if target.exists():
                 backup = ARCHIVE / f"{target.stem}-{stamp}{target.suffix}"
-                shutil.copy2(target, backup)
+                atomic_copy(target, backup)
                 print(f"ARCHIV {backup}", flush=True)
-            shutil.copy2(best_path, target)
+            atomic_copy(best_path, target)
             promoted_path, reason = target, f"score={best['score']} ≥ Gate"
             print(f"PROMOTED {best_path} → {target}", flush=True)
         else:

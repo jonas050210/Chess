@@ -72,7 +72,7 @@ bash ubuntu/train.sh --preset cpu --max-seconds 600 --no-promote
 pip3 install torch --index-url https://download.pytorch.org/whl/cu121
 pip3 install -r requirements-gpu.txt
 bash ubuntu/train.sh --preset auto --games 200 --gpu-sims 60 \
-  --tactics-epochs 180 --eval-games 16 --max-seconds 3600
+  --tactics-epochs 180 --eval-games 32 --max-seconds 3600
 ```
 
 Ohne `--no-promote` darf der Kandidat erst nach bestandenem Arena-Gate `model.npz` / `model_torch.pt` ersetzen; vorher wird archiviert. Details: `docs/TRAINING.md`.
