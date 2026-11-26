@@ -1,96 +1,60 @@
-# Training v6 · nur Terminal
+# Training Chess Garden from a terminal
 
-> Kein Trainings-Button in Browser oder Tk. Alles läuft über `ai/train_cli.py` bzw. `ubuntu/train.sh` / `windows/train.bat`.
+**Nothing trains in the website.** The browser is for playing. `python ai/train_cli.py` is the only supported way to evaluate and promote a new active checkpoint; `train_basics.py`, `train_smoke.py`, `train_tactics.py` and `train_gpu.py` can create candidates but refuse to write directly to `checkpoints/model.npz` / `model_torch.pt`.
 
-## Was verbessert wurde
+## Quick, safe experiment
 
-| Vorher | Jetzt |
-|---|---|
-| `train.sh` überschreibt `model.npz` direkt | Kandidaten unter `checkpoints/candidates/`, aktives Modell bleibt geschützt |
-| Unsicheres Gate mit wenigen Spielen | gepaarte Partien mit denselben reproduzierbaren Eröffnungen; mindestens 12 Spiele und 95%-Untergrenzen für Score und Zugewinn |
-| Fehler/Abbruch während Promotion | Archiv-Kopie, temporäre Datei und atomares `os.replace` |
-| Feste lange Läufe | `--max-seconds`, `--dry-run`, Presets, `--no-promote` |
-| Seeds nur pro Skript | ein `--seed` wird konsistent an Smoke/Taktik/GPU weitergegeben |
-| Kein Early-Stopping | `--target-loss`, `--patience`, `--mate-check` in `train_tactics.py` |
-| Leerer Replay-Buffer konnte crashen | `ReplayBuffer.sample()` liefert leere Arrays |
-| GPU-Selfplay lief auch ohne CUDA los | `auto` erkennt Torch/CUDA und überspringt/schaltet auf CPU |
+```bash
+python ai/train_cli.py --dry-run
+python ai/train_cli.py --preset basics --basics-epochs 60 --max-seconds 120 --no-promote
+```
+
+`--dry-run` prints commands and writes **nothing**. The second command trains on a small curated curriculum, checks it on disjoint held-out positions and, if time remains, runs a paired evaluation. It cannot replace the active checkpoint because of `--no-promote`; the JSON report still includes whether the completed-game gate *would* pass. Reports and `.npz`/`.pt` candidates live in ignored `checkpoints/candidates/`.
 
 ## Presets
 
-| Preset | Ablauf |
+| Preset | Work |
 |---|---|
-| `auto` (Default) | Smoke → Taktik → GPU-Selfplay falls Torch → Arena → Gate |
-| `cpu` | Smoke → Taktik → Arena → Gate |
-| `gpu` | GPU-Selfplay → Arena → Gate (ohne Torch: nur Arena) |
-| `smoke` | CPU-Smoke → Arena → Gate |
-| `tactics` | Taktik-Distillation → Arena → Gate |
-| `eval` | nur Arena gegen aktiven Checkpoint, kein Training |
+| `basics` | Supervise curated moves plus ~220 legal synthetic capture/promotion/en-passant setups (including color/file augmentation); balance patterns during training and print eight-position held-out accuracy |
+| `smoke` | Short CPU self-play sanity check |
+| `tactics` | Distill tactical positions from the search engine; prints held-out mates separately from memorized training examples |
+| `cpu` | `basics` → `smoke` → `tactics` |
+| `gpu` | Explicit PyTorch self-play; CPU is possible but much slower |
+| `auto` | CPU steps, then GPU only if CUDA is available |
+| `eval` | Score the existing active checkpoint only; no training or promotion |
 
-## Befehle
+Use `--max-seconds N` to bound steps and Arena play (a single already-started move may finish after the deadline). `--strict` returns immediately on a failed subprocess; non-strict runs can continue, but **no failed run promotes a candidate**. `--seed` and `--eval-seed` control reproducibility. `--resume` must exist and match the checkpoint type trained by the preset. `--out` cannot point at an active checkpoint; stand-alone trainers also reject wrong formats and symlink aliases. On a 2 GB machine stick to `basics`/`smoke` or use the play-only `CHESS_LOW_RAM=1` server mode.
+
+## Promotion is intentionally hard
+
+When promotion is permitted, the CLI:
+
+1. Evaluates active and candidate models against the same level-2 search opponent, same opening set and alternating colors.
+2. Counts an illegal/absent move as a **loss**, never a draw. A game stopped by a ply or wall-time cap is **unfinished** and is excluded from both scoring and matched pairs.
+3. Scores the **held-out** lessons; a training-set mate check is not a strength metric.
+4. Requires >=12 completed matched games, candidate score lower 95% bound >= `--min-score` (default 0.55), paired gain lower 95% bound >= `--min-delta` (default 0.05), and fundamentals held-out accuracy >= `--min-basics-accuracy` (default 0.5). A NumPy candidate cannot displace an already approved Torch model.
+5. Copies the old active checkpoint into `checkpoints/archive/`, atomically replaces it, then writes `model.approved.json` or `model_torch.approved.json` with its SHA-256 and gate report. The server checks the hash on startup; a partial/stale receipt cannot activate the model. **Restart the server** after a promotion.
+
+With only 12–32 games, conservative one-sided 95% Hoeffding bounds on completed game scores and paired gains are a regression check, not proof of a chess rating. For credible strength gains, use far more finished paired games, separate tactical suites, stronger opponents and repeated seeds. Set `--no-promote` while experimenting.
+
+**Observed sandbox run (2026-11-26):** `--preset basics --basics-epochs 60 --max-seconds 120 --eval-games 12 --eval-sims 8 --strict --no-promote` completed; the NumPy candidate scored **1/8 held-out** (unchanged) and **lost all 12 completed Arena games** against the level-2 search engine. The original checkpoint lost 11 games with one unfinished. The candidate was **not promoted**. This result is deliberately reported rather than described as a strong bot: the search engine is the reliable default until a candidate actually passes. A tiny smoke self-play run (14 positions) and tactics run (13 positions) also produced loadable *candidate* files, not promotion evidence.
+
+## GPU (optional, not verified in this workspace)
+
+On a compatible NVIDIA machine install a CUDA-enabled PyTorch build for the installed driver and then `python -m pip install -r requirements-gpu.txt`. Try:
 
 ```bash
-# 1) Immer zuerst: Plan ohne Dateiänderungen
-python3 ai/train_cli.py --dry-run
-
-# 2) Kurzer CPU-Lauf mit Zeitbudget, keine Promotion
-python3 ai/train_cli.py --preset cpu --max-seconds 120 --no-promote
-
-# 3) Ernsthafter Ubuntu-Lauf mit CUDA
-bash ubuntu/train.sh --preset auto --games 200 --gpu-sims 60 \
-  --tactics-epochs 180 --eval-games 32 --min-score 0.60 --min-delta 0.05
-
-# 4) Nur Stärke prüfen
-python3 ai/train_cli.py --preset eval --eval-games 32 --eval-sims 30 --baseline-level 2
-
-# 5) Windows-Terminal (CPU)
-windows\train.bat --preset cpu --max-seconds 300 --no-promote
+bash ubuntu/train.sh --preset gpu --device cuda --games 200 --gpu-sims 60 \
+  --eval-games 64 --max-seconds 14400
 ```
 
-Wichtige Flags: `--device auto|cpu|cuda`, `--seed`, `--eval-seed` (reproduzierbare Opening-Auswahl), `--eval-games` (Default 32), `--max-seconds`, `--resume`, `--out`, `--report`, `--min-score`, `--min-delta`, `--target-loss`, `--patience`, `--mate-check` (immer aktiv im CLI), `--no-promote`, `--strict`. Promotion benötigt mindestens 12 gepaarte Partien; sowohl die untere 95%-Konfidenzgrenze des Kandidaten-Scores als auch die des gepaarten Zugewinns müssen das Gate bestehen.
+Torch checkpoint files include architecture dimensions (`channels`, `blocks`, `planes`) for loading custom-size ResNets. Old raw `state_dict` files are also readable. GPU self-play is currently sequential MCTS inference, **not batched**; hours of GPU runtime alone will not guarantee a strong model. A better replay scheme and stronger policy/value architecture are longer-term improvements.
 
-## Dateien
+## Reproducible quality checks
 
-```text
-checkpoints/
-  model.npz              aktives NumPy-Modell (nur Promotion schreibt hier)
-  model_torch.pt         aktives Torch-Modell, hat Vorrang (falls vorhanden)
-  candidates/<run>.npz   NumPy-Kandidat
-  candidates/<run>.pt    Torch-Kandidat
-  candidates/<run>.json  Report: Commands, RCs, Arena-Scores, Promotion
-  archive/<name>-<ts>    Backup vor Promotion
+```bash
+python -m unittest discover -s tests -v
+npm run test:unit
 ```
 
-## Ehrliche Einordnung
-
-Ja, ich kann hier im Terminal trainieren: CPU-Smoke + Taktik-Distillation laufen ohne GPU. In dieser Sandbox fehlen PyTorch/CUDA; GPU-Selfplay wird automatisch übersprungen. Ein kurzer Lauf erzeugt einen gültigen Kandidaten, **beweist aber keine Spielstärke**. Stärke braucht lange Selfplay-Läufe auf Ubuntu/GPU, ausreichend Arena-Spiele und ein positives Gate. Der Server bleibt währenddessen unangetastet und lädt erst nach bestandener Promotion das neue Modell.
-
-**Längerer CPU-Lauf hier (33.2 s, `--no-promote`):** 124 Selfplay-Positionen, 197 Taktik-Samples, 60 Epochen, `loss 2.0818`, `mate_hit=4/4`. Arena bei 4 Spielen: `model.npz 0.125` vs. `demo.npz 0.0` → **Kandidat war schlechter**, korrekt keine Promotion. Das ist genau der Sinn des Gates: Taktik-MattTreffer allein sind noch keine Spielstärke. Kandidat, Log und Report wurden beim Cleanup gelöscht; die Zahlen stehen hier.
-
-## Bringt Training etwas — oder ist Code besser?
-
-**Kurzantwort: aktuell ist Code besser.** Regeln, `BaselineBot`, Taktik-Bonus, MCTS-Cache/Root-Reuse, Legal-Mask, Eval und UI liefern sofort messbare Züge. Training hat bei uns `mate_hit=4/4` erzeugt, aber die Arena trotzdem verloren. Ein kleines NumPy-MLP (1344 → 128 → 4672) + 40 MCTS-Sims lernt aus zu wenigen Selfplay-Partien kein Positionsverständnis.
-
-Training wird erst sinnvoll, wenn **vorher** die Code-Basis besser ist:
-
-1. Batch-Inference im MCTS (statt 1 Forward pro Sim) → 3–10× mehr Sims/s.
-2. ResNet mit Legal-Policy-Head + Value-Target aus Spielausgang statt reinem Teacher-CP.
-3. Bessere Bewertung: Mobilität, Königssicherheit, Bauernstruktur, Endspiel-Tabellen.
-4. Replay mit Priorität/League/Selfplay-Gegnern statt nur Zufallsstellungen.
-5. Arena mit genug Spielen + Konfidenz, nicht 2–4 Partien.
-
-Auf dem **2-GB-i3-Laptop**: Training praktisch nur Smoke/Demo, kein Stärkegewinn. Auf dem **i7-12700F + RTX 4060 Ti 8 GB**: nach den Code-Fixes ja, dort bringt langes Selfplay etwas.
-
-## Milestones · realistische Zeitabschätzung
-
-Basis ist der gemessene Lauf oben: 3 Selfplay-Games/16 Sims = 3,0 s, 197 Taktik-Samples/60 Epochen = 17,8 s, Arena ≈ 1,5 s pro Partie bei 12 Sims. Werte sind **Schätzungen**, keine Garantie; 2 GB RAM bremst zusätzlich durch Swapping.
-
-| # | Meilenstein | i3-1210U · 2 GB RAM (Windows-Laptop) | i7-12700F · 32 GB · RTX 4060 Ti 8 GB | Befehl |
-|---|---|---:|---:|---|
-| M0 | UI/Regeln/API laufen | 0 s (fertig) | 0 s (fertig) | `windows\lowram.bat` |
-| M1 | Smoke-Checkpoint + `mate_hit=4/4` | 1–3 min | 0,5–2 min | `--preset cpu --max-seconds 180` |
-| M2 | Taktik stabil: `loss<2.0`, 120 Epochen, 3 Seeds | 5–15 min | 3–8 min (GPU hilft kaum, NumPy) | `--preset tactics --tactics-epochs 120` |
-| M3 | 40–100 Selfplay-Games, erste Arena > Baseline Lvl 1 (≥0,55 / 32 gepaarte Spiele) | 30–90 min, nicht empfohlen | 15–45 min | `--preset auto --games 100 --eval-games 32` |
-| M4 | Arena > Baseline Lvl 2/3 (≥0,60 / 32 Spiele) | viele Stunden bis Tage | 2–6 h | `--games 400 --gpu-sims 60 --eval-games 32` |
-| M5 | „spürbar starke KI“ (konsistent gegen stärkere Gegner) | nicht realistisch | Tage + Code-Umbau | Batched MCTS, ResNet, League, Millionen Positionen |
-
-**Wichtig:** M3–M5 sind mit dem aktuellen Code **nicht garantiert**. Unser 33-s-Lauf hat M1 erreicht, M2 teilweise, M3 **nicht** (Arena 0,0). Ohne die Code-Fixes oben kann auch ein 6-Stunden-Lauf auf der 4060 Ti nur ein besser angepasstes, aber immer noch schwaches MLP erzeugen. Meilensteine heißen hier: Gate bestanden — nicht „Engine-Stärke bewiesen“.
+`ai/lessons.py` splits teaching examples from held-out examples. A correct curriculum addition must be legal, use a distinct held-out position (not a color-flipped copy of the same mate), and pass `verify_lessons()`. Record results from multiple openings/seeds before promoting. The original `checkpoints/model.npz` is retained as an **unapproved comparison checkpoint**; live games use the search engine until a genuinely gated candidate is installed.

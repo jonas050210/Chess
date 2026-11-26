@@ -1,29 +1,19 @@
-# Improvements · v6.2
+# Engineering notes · web-only Chess Garden
 
-## Jetzt umgesetzt
+## Delivered in this branch
 
-1. **Style-Reset:** Storybook-/Duolingo-inspiriertes Light-Theme als Default (`duo`); alte 5 Themes bleiben wählbar.
-2. **Pieces nochmals neu:** 6 eigene Sticker-Silhouetten (Kreuz/Krone/Zinnen/Mütze/Pferd/Bauer), Gesichter, Marken, dicke Night-Ink-Outlines, frische Shades; 6 Themes × 2 Varianten × 12 = **144 PNGs in einer `assets/pieces.zip`**, direkt via `tk.PhotoImage(data=...)` geladen.
-3. **GUI:** weiße Papier-Flächen, 2px Borders, grüne CTA mit 4px Lip, Blue-Hover, Tooltips, Pawn-Mascot in allen 3 Fenstern.
-4. **Echt runde Tk-Widgets:** Cards, Checkboxen, OptionMenus, Spinboxen, Textfelder und Buttons nutzen Arc-basierte `RoundedFrame`/`round_rect` statt pixeliger Polygone. Tooltips binden mit `add="+"` und blockieren Hover/Klick nicht mehr.
-5. **Fenster bewegbar:** `⋮⋮ ZIEHEN`-Header mit Drag-Bindings auf allen 3 Fenstern; Geometrie wird auf kleine Bildschirme geklemmt statt außerhalb zu liegen.
-6. **Brett-Kontrast:** helle Felder `#ffffff`, dunkle `#a5ed6e` (Fresh Leaf) + 1px Grid, statt „komplett grün“.
-7. **2-GB-RAM-Modus:** `windows\lowram.bat`, `ubuntu/lowram.sh`, `py main.py --low` → MCTS 4–24 Sims, Analyse-Thread aus, `OMP_NUM_THREADS=1`, Poll 1200 ms, kein Browser nötig.
-8. **Drag & Animation:** Figur wird beim Ziehen aus dem Feld gehoben (Ghost in Tk + Browser); Züge gleiten in ~200 ms, Rochade animiert König **und** Turm, Promotion animiert den Bauern. Abschaltbar per Animation-Toggle / Low-RAM.
-9. **Match-Mechanics:** Remis-Angebot mit Bot-Entscheidung, Abbruch vor Zug 2, Zugzeiten, Timeout, Inkrement, Premove, Unterverwandlung, 50-Züge/3-fach, Aufgabe, Remis-Einigung, Undo, Hint, Flip.
-10. **Sync:** Theme/Textur/Pfeile/Premove/Koordinaten/Animation/Auto-Dame/Zeit/Level über `/api/settings` in Browser-UI und allen 3 Tk-Fenstern.
-11. **Shortcuts:** `N` neu, `U` zurück, `H` Tipp, `F` drehen, `O` Remis anbieten, `A` Abbruch, `C` Markierungen löschen, `Esc` Premove abbrechen.
-12. **Training v6 (nur Terminal):** `ai/train_cli.py`, Kandidaten statt destruktiver Checkpoints, Arena-Gate, Archiv/Backup, JSON-Report, Zeitbudget, Seeds, Early-Stopping, Matt-Check, CUDA-Erkennung. Details + Milestones: `docs/TRAINING.md`.
-13. **Ordner-Struktur:** `web/` nur `index.html`; Docs in `docs/`, Vorschau in `assets/preview/`, Dev-Tools in `tools/`, Starter in `windows/` + `ubuntu/`. Gelöscht: `uploads/`, `image-search/`, alle losen Piece-/Preview-PNGs bis auf `all-preview.png`, `assets/pieces_svg/`, Demo-Kandidat/Log/Report, doppelte Root-Starter, Caches/Pycache.
-14. **Preview:** genau **ein** persistentes PNG `assets/preview/all-preview.png`; Xvfb-Screenshot und alle Zwischen-SVGs/PNGs entstehen temporär und werden gelöscht.
+- Replaced the three Tk windows, ZIP of low-resolution PNG pieces, and schematic preview with a responsive web-first game, original scalable SVG chess art, real browser screenshot, and self-hosted assets.
+- Rules stay in `python-chess`. Claimable draws no longer auto-end games or override an expired clock; bot-game claims require the human's turn; draw agreements require an actual opponent's offer; undo restores clocks, increments and move statistics; captured-piece displays follow actual captures rather than miscounting promoted pawns; errors validate JSON types and return 400 instead of 500.
+- Per-browser in-memory games, same-origin checks, sessionStorage fallback for embedded previews; async bot/analysis outside the game lock, with stale search results discarded after undo/new/timeout.
+- Reliable alpha-beta playing search by default; check-aware quiescence, mate scoring, king safety and pawn structure. Model activation requires a SHA-256 receipt from the gated terminal trainer.
+- Disjoint basic lessons with mechanically verified synthetic positions, incomplete-game-aware Arena and self-play labels, protected candidate paths, strict training error propagation, architecture-aware Torch checkpoints. The measured candidate still failed the gate (see [Training](TRAINING.md)); this is intentionally not advertised as a strength gain.
+- Python rules/API/training tests, JS board/art tests, real Chromium tests for click/drag/touch moves, undo, draw, premove, promotion, PGN export, board annotations, orientation and mobile layouts in CI.
 
-## Als Nächstes würde ich machen
+## Honest remaining limits and valuable future work
 
-1. **Code vor Training:** Batch-Inference im MCTS, ResNet mit Legal-Policy-Head, bessere Eval (Mobilität/Königssicherheit/Bauern), Replay/League — das bringt aktuell mehr als längeres Trainieren.
-2. Mehr Mascot-Gesichter / Reaktionen für Schach, Matt, Remis, Sieg — weiterhin eigene Vektoren.
-3. XP/Streak/Rewards-Gamification: Genauigkeit, Bester Zug, Blunder-Tags, tägliche Challenge.
-4. PGN-Export, Stellungs-URL, Eröffnungsname, Zugklassifizierung und Move-Review.
-5. Puzzle-/Taktik-Modus mit gleichem Storybook-Board.
-6. Arena-Dashboard direkt im Stats-Fenster (Win-Rate pro Checkpoint).
-7. PyInstaller-Build für echte `Chess.exe` + Installer, zusätzlich zu `py main.py`.
-8. Langer GPU-Lauf auf dem Heim-PC mit automatischem Eval-Gate, Checkpoint-Versionierung und Rollback.
+1. **Measure real strength**, not just a few mate puzzles. Build a larger independent annotated tactical/endgame test set, run hundreds of completed paired games against several opponent strengths and publish the results. The small training curriculum is illustrative, not a rating.
+2. **Improve model search efficiency.** MCTS currently calls the policy/value net per leaf; batched inference, tree reuse across self-play and an upgraded policy head/replay scheme should precede any long GPU run. PyTorch/CUDA training still needs end-to-end testing on actual hardware.
+3. **Persist games** if needed beyond a local session. Browsers are isolated but in-memory positions are lost on server restart; saving PGN manually works now. A database can be added without putting a login or training UI in the game.
+4. **Add deeper learning modes** after core strength is measured: verified tactical puzzles, post-game move review and feedback. A small local search should not label every move a "blunder" as if it were a master engine.
+5. **Harden deployment** before any public hosting. Host binding defaults to localhost and the reverse-proxy preview is not authenticated. A public service would need authentication, rate limits, persistence and resource quotas; cookies/opaque IDs only isolate games.
+6. **Polish accessibility** with screen-reader play testing, richer announcements for promotion and clock events, and touch-friendly annotation gestures. The existing board supports arrow-key navigation and reduced-motion preferences.

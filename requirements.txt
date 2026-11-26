@@ -1,5 +1,4 @@
-python-chess>=1.11
-flask>=3.0
-numpy>=1.26
-# optional für ai/model.py::TorchPolicyValueNet (hier nicht nötig):
-# torch>=2.3
+# Runtime: browser UI, local rule-authoritative chess API, CPU training/search.
+python-chess>=1.11,<2
+Flask>=3.0,<4
+numpy>=1.26,<3

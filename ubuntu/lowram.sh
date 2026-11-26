@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 2-GB-RAM-Modus: kleine MCTS, keine Daueranalyse, langsameres Polling.
+# Browser-only server for a small laptop: no continuous analysis, fewer MCTS sims.
 set -e
 cd "$(dirname "$0")/.."
-export CHESS_LOW_RAM=1 PORT=8000 CHESS_PORT=8000 OMP_NUM_THREADS=1
-exec python3 main.py --low "$@"
+export CHESS_LOW_RAM=1 OMP_NUM_THREADS=1
+exec python3 server.py "$@"

@@ -150,9 +150,26 @@ if HAS_TORCH:
         def __init__(self, channels: int = 64, blocks: int = 4,
                      device: str | None = None, checkpoint: str | None = None):
             self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-            self.net = TorchPolicyValueNet(channels=channels, blocks=blocks).to(self.device)
+            weights = None
             if checkpoint and os.path.exists(checkpoint):
-                self.net.load_state_dict(torch.load(checkpoint, map_location=self.device))
+                # weights_only avoids unpickling arbitrary Python objects. v2
+                # checkpoints also carry architecture dimensions for inference.
+                saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
+                if isinstance(saved, dict) and "state_dict" in saved:
+                    if saved.get("planes", PLANES) != PLANES:
+                        raise ValueError("Checkpoint input planes do not match this engine")
+                    channels = int(saved["channels"])
+                    blocks = int(saved["blocks"])
+                    weights = saved["state_dict"]
+                else:  # legacy raw state_dict
+                    weights = saved
+                    channels = int(weights["stem.0.weight"].shape[0])
+                    blocks = len({key.split(".")[1] for key in weights
+                                  if key.startswith("blocks.")})
+            self.channels, self.blocks = channels, blocks
+            self.net = TorchPolicyValueNet(channels=channels, blocks=blocks).to(self.device)
+            if weights is not None:
+                self.net.load_state_dict(weights, strict=True)
             self.net.eval()
 
         def forward(self, x: np.ndarray, mask: np.ndarray):
@@ -169,7 +186,8 @@ if HAS_TORCH:
 
         def save(self, path: str):
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            torch.save(self.net.state_dict(), path)
+            torch.save({"version": 2, "planes": PLANES, "channels": self.channels,
+                        "blocks": self.blocks, "state_dict": self.net.state_dict()}, path)
 else:
     TorchPolicyValueNet = None       # type: ignore
     TorchPolicyValueWrapper = None  # type: ignore
