@@ -21,10 +21,50 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-      - run: python -m pip install -r requirements.txt
+      - run: python -m pip install -r requirements.txt 'python-dotenv>=1,<2'
       - run: python -m unittest discover -s tests -v
-      - run: python -m compileall -q ai server.py tests
+      - run: python -m compileall -q ai server.py main.py tests
       - run: npm run test:unit
+
+  windows-launch:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - shell: powershell
+        run: .\windows\setup.bat
+      - shell: powershell
+        run: |
+          & .\.venv\Scripts\python.exe -m pip install 'python-dotenv>=1,<2'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\.venv\Scripts\python.exe -m unittest discover -s tests -p test_launcher.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - shell: powershell
+        run: |
+          # PowerShell 5.1's UTF-16 .env previously crashed Flask at startup.
+          [IO.File]::WriteAllText((Join-Path (Get-Location) '.env'), 'CHESS_LOW_RAM=1', [Text.Encoding]::Unicode)
+          $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+          $listener.Start()
+          $env:PORT = "$($listener.LocalEndpoint.Port)"
+          $listener.Stop()
+          $env:CHESS_NO_BROWSER = '1'
+          $process = Start-Process -FilePath 'py' -ArgumentList 'main.py' -PassThru -NoNewWindow
+          try {
+            $ready = $false
+            $deadline = (Get-Date).AddSeconds(20)
+            while ((Get-Date) -lt $deadline) {
+              if ($process.HasExited) { throw "py main.py exited: $($process.ExitCode)" }
+              try {
+                $reply = Invoke-WebRequest -Uri "http://127.0.0.1:$env:PORT/api/state" -UseBasicParsing -TimeoutSec 2
+                if ($reply.StatusCode -eq 200) { $ready = $true; break }
+              } catch { Start-Sleep -Milliseconds 200 }
+            }
+            if (-not $ready) { throw 'py main.py did not serve the browser API' }
+          } finally {
+            & taskkill /PID $process.Id /T /F | Out-Null
+          }
 
   browser:
     runs-on: ubuntu-latest
