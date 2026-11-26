@@ -811,4 +811,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"Chess Garden · browser at http://{HOST}:{port} · low RAM={LOW_RAM}")
     # Threading remains on in low-RAM mode: a search must not block the API.
-    app.run(host=HOST, port=port, threaded=True, debug=False)
+    # Flask would otherwise auto-read a nearby .env/.flaskenv as UTF-8. A
+    # UTF-16 .env produced by Windows PowerShell 5.1 must not prevent play.
+    # Configure CHESS_* and PORT through the process environment instead.
+    app.run(host=HOST, port=port, threaded=True, debug=False, load_dotenv=False)

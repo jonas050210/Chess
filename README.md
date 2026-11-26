@@ -6,18 +6,40 @@ A **browser-only, local chess game** with friendly, Duolingo-inspired (not Duoli
 
 ## Play
 
-Python 3.10+ is required. From the repository root:
+Python 3.10+ is required. **After one-time setup, `py main.py` (Windows) or `python3 main.py` (Linux) starts the local server and opens the default browser** at http://127.0.0.1:8000/. Keep the terminal open while playing; Ctrl+C stops the server. The launcher automatically uses this repository's `.venv` when it exists, even when you invoke it with the global Python.
+
+**Windows PowerShell (new installation; Git for Windows and the Python launcher required):**
+
+```powershell
+git clone https://github.com/jonas050210/Chess.git
+cd Chess
+.\windows\setup.bat
+py main.py
+```
+
+If the **`Chess` folder already exists**, `git clone` cannot clone into it. Save any local edits first; from that folder, update the existing checkout instead:
+
+```powershell
+cd Chess
+git status --short
+git fetch origin
+git switch main
+git pull --ff-only origin main
+.\windows\setup.bat
+py main.py
+```
+
+If `git status --short` shows changes you want to keep, commit or otherwise save them **before** switching/pulling. `windows\start.bat` is an alternative to `py main.py` and also opens the browser. For low-RAM play in PowerShell: `$env:CHESS_LOW_RAM='1'; py main.py` (or `bash ubuntu/lowram.sh` on Linux). This disables continuous analysis; the default search bot's idle RAM savings are small.
+
+**Linux (new installation, from the repository root):**
 
 ```bash
 python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements.txt
-python server.py
+.venv/bin/python -m pip install -r requirements.txt
+python3 main.py
 ```
 
-Open **http://127.0.0.1:8000** in your browser. On Windows, use `py -3 -m venv .venv`, activate with `.venv\Scripts\activate`, and then run `python -m pip install -r requirements.txt` and `python server.py`. Alternatively, `windows\setup.bat` creates a local `.venv` and `windows\start.bat` starts the browser server with it. `bash ubuntu/lowram.sh` starts the web server without live analysis on small machines.
-
-For a different port: `PORT=8001 python server.py` (PowerShell: `$env:PORT=8001; python server.py`). The default bind address is **127.0.0.1**. `CHESS_HOST=0.0.0.0` is intended only for trusted networks or the Arena live preview: **this is not an authenticated public service**. Browser games live in memory and disappear on server restart; separate clients have separate games (a cookie plus a session-storage fallback for embedded previews).
+For a different port: `PORT=8001 python3 main.py` (PowerShell: `$env:PORT=8001; py main.py`). For an unattended server without opening a browser, set `CHESS_NO_BROWSER=1`, or run `python server.py`. Flask's automatic `.env`/`.flaskenv` loading is deliberately disabled: a Windows PowerShell 5.1 UTF-16 `.env` otherwise makes Flask crash before it starts. Use process environment variables such as `$env:CHESS_LOW_RAM='1'` instead; you do not need to delete an old `.env` to play. The default bind address is **127.0.0.1**. `CHESS_HOST=0.0.0.0` is intended only for trusted networks or the Arena live preview: **this is not an authenticated public service**. Browser games live in memory and disappear on server restart; separate clients have separate games (a cookie plus a session-storage fallback for embedded previews).
 
 ### Controls
 
@@ -50,13 +72,13 @@ The **basics curriculum** (`ai/lessons.py`) teaches mate-in-one, hanging capture
 
 ```bash
 python -m unittest discover -s tests -v
-python -m compileall -q ai server.py tests
+python -m compileall -q ai server.py main.py tests
 npm run test:unit                      # pure browser logic and SVG art; Node 22+
 npm ci && npx playwright install chromium
 npm run test:e2e                       # real browser, Python server required on PATH
 ```
 
-CI runs Python tests on 3.10 and 3.12, Node unit tests, and Chromium browser tests covering click/drag/touch play, undo, draws, premoves, promotions, annotations, PGN export, pieces and 360–1440px layouts. The Playwright config starts the server automatically; activate the Python environment before running it locally. For an iframe preview, start with `CHESS_HOST=0.0.0.0 python server.py`; the website calls the API through **relative URLs** only.
+CI runs Python tests on 3.10 and 3.12, a Windows PowerShell 5.1 launch check with a UTF-16 `.env`, Node unit tests, and Chromium browser tests covering click/drag/touch play, undo, draws, premoves, promotions, annotations, PGN export, pieces and 360–1440px layouts. The Playwright config starts the server automatically; activate the Python environment before running it locally. For an iframe preview, start with `CHESS_HOST=0.0.0.0 python server.py`; the website calls the API through **relative URLs** only.
 
 | Path | Purpose |
 |---|---|
