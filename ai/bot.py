@@ -34,7 +34,12 @@ def approved_checkpoint(path: str | None) -> bool:
         with open(path, "rb") as f:
             for chunk in iter(lambda: f.read(1 << 20), b""):
                 digest.update(chunk)
-        return json.loads(receipt.read_text(encoding="utf-8"))["sha256"] == digest.hexdigest()
+        report = json.loads(receipt.read_text(encoding="utf-8"))
+        gate = report["gate"]
+        # An older approval against a weaker level-2 opponent cannot replace
+        # today's strongest built-in level-5 search in live games.
+        return (report["sha256"] == digest.hexdigest() and
+                gate.get("passed") is True and gate.get("baseline_level") == 5)
     except (OSError, ValueError, KeyError, TypeError):
         return False
 

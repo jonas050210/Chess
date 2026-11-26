@@ -17,9 +17,9 @@
           <svg viewBox="0 0 64 64" width="38" height="38">
             <circle cx="32" cy="32" r="29" fill="#dcf7bb"/>
             <circle cx="32" cy="22" r="8" fill="#fffef1" stroke="#245044" stroke-width="3"/>
-            <path d="M26 31 Q20 36 26 42 L20 47 H44 L38 42 Q44 36 38 31 Z" fill="#fffef1" stroke="#245044" stroke-width="3" stroke-linejoin="round"/>
-            <path d="M19 47 H45 L48 53 H16 Z" fill="#fffef1" stroke="#245044" stroke-width="3" stroke-linejoin="round"/>
-            <circle cx="29" cy="22" r="1.4" fill="#245044"/><circle cx="35" cy="22" r="1.4" fill="#245044"/>
+            <path d="M25 32 Q32 35 39 32 L42 38 Q32 42 22 38 Z" fill="#e1e9d9" stroke="#245044" stroke-width="2.5" stroke-linejoin="round"/>
+            <path d="M27 39 H37 L43 48 H21 Z" fill="#fffef1" stroke="#245044" stroke-width="3" stroke-linejoin="round"/>
+            <path d="M19 48 H45 L48 54 H16 Z" fill="#fffef1" stroke="#245044" stroke-width="3" stroke-linejoin="round"/>
           </svg>
         </span>
         <span class="brand-copy"><strong>chess garden<span class="brand-period">.</span></strong><small>grow your game</small></span>
@@ -40,21 +40,33 @@
     </div>
 
     <main class="game-layout">
-      <section class="play-area" aria-label="Chess game">
+      <section class="play-area" id="playArea" aria-label="Chess game">
         <div class="board-card">
-          <div class="board-card-heading"><span class="section-kicker"><span class="kicker-icon" aria-hidden="true">♟</span> THE GAME</span><span class="turn-pill" id="matchTag">Your move</span></div>
+          <div class="board-card-heading"><span class="section-kicker"><span class="kicker-icon" aria-hidden="true">♟</span> THE GAME</span><div class="heading-actions"><span class="turn-pill" id="matchTag">Your move</span><button type="button" class="fullscreen-button" id="btnFullscreen" aria-label="Enter fullscreen" aria-pressed="false" title="Fullscreen game view">⛶ <span>Fullscreen</span></button></div></div>
 
           <div class="player-strip" id="topStrip">
             <div class="player-avatar opponent-avatar" id="topAvatar" aria-hidden="true">B</div>
             <div class="player-meta"><strong id="topName">Garden bot</strong><span class="captured-pieces" id="topCaptured" aria-label="Captured pieces"></span></div>
-            <div class="chess-clock" id="topClock" aria-label="Opponent's clock">10:00</div>
           </div>
 
-          <div class="board-and-eval">
-            <div class="eval-rail" aria-label="Position evaluation" title="Evaluation from White's point of view">
-              <div class="eval-white" id="evalFill" style="height:50%"></div>
-              <span class="eval-label" id="evalValue">—</span>
-            </div>
+          <div class="board-and-time">
+            <aside class="time-panel" aria-label="Unlimited game time">
+              <div class="time-block bot-time" id="botTimeBlock">
+                <span class="time-caption" id="botTimeLabel">BOT · BLACK</span>
+                <strong class="time-value" id="botTime">0:00</strong>
+                <small id="botLastMove">Last move —</small>
+              </div>
+              <div class="time-block total-time">
+                <span class="time-caption">GAME TIME</span>
+                <strong class="time-value" id="gameTime">0:00</strong>
+                <small>Unlimited · no timeout</small>
+              </div>
+              <div class="time-block your-time" id="yourTimeBlock">
+                <span class="time-caption" id="yourTimeLabel">YOU · WHITE</span>
+                <strong class="time-value" id="yourTime">0:00</strong>
+                <small id="yourLastMove">Last move —</small>
+              </div>
+            </aside>
             <div class="board-frame">
               <div class="board-surface">
                 <div id="board" class="board" role="grid" aria-label="Chess board; use arrow keys and Enter to move pieces"></div>
@@ -67,7 +79,6 @@
           <div class="player-strip" id="bottomStrip">
             <div class="player-avatar you-avatar" id="bottomAvatar" aria-hidden="true">YOU</div>
             <div class="player-meta"><strong id="bottomName">You</strong><span class="captured-pieces" id="bottomCaptured" aria-label="Captured pieces"></span></div>
-            <div class="chess-clock" id="bottomClock" aria-label="Your clock">10:00</div>
           </div>
 
           <div class="play-status"><span class="status-spark" aria-hidden="true">✦</span><div><strong id="statusTitle" role="status" aria-live="polite">Setting up the board…</strong><span id="statusSubtitle">Make a move to get started.</span></div></div>
@@ -82,33 +93,30 @@
 
       <aside class="sidebar" aria-label="Game controls">
         <section class="coach-card" aria-label="Chess tip">
-          <span class="coach-icon" aria-hidden="true"><svg viewBox="0 0 72 72" width="68" height="68"><circle cx="36" cy="36" r="33" fill="#f9e68f"/><path d="M25 50 Q19 44 25 39 Q21 32 30 30 Q24 19 36 18 Q48 19 42 30 Q51 33 47 39 Q53 44 47 50 Z" fill="#fffdf2" stroke="#325140" stroke-width="3" stroke-linejoin="round"/><path d="M21 50 H51 L54 56 H18 Z" fill="#fffdf2" stroke="#325140" stroke-width="3" stroke-linejoin="round"/><circle cx="32" cy="36" r="1.8" fill="#325140"/><circle cx="40" cy="36" r="1.8" fill="#325140"/><path d="M32 42 Q36 46 40 42" fill="none" stroke="#325140" stroke-width="2" stroke-linecap="round"/></svg></span>
+          <span class="coach-icon" aria-hidden="true"><svg viewBox="0 0 72 72" width="68" height="68"><circle cx="36" cy="36" r="33" fill="#f9e68f"/><circle cx="36" cy="23" r="9" fill="#fffdf2" stroke="#325140" stroke-width="3"/><path d="M27 34 Q36 38 45 34 L48 40 Q36 45 24 40 Z" fill="#dfe9d9" stroke="#325140" stroke-width="2.6" stroke-linejoin="round"/><path d="M29 41 H43 L49 52 H23 Z" fill="#fffdf2" stroke="#325140" stroke-width="3" stroke-linejoin="round"/><path d="M20 52 H52 L55 58 H17 Z" fill="#fffdf2" stroke="#325140" stroke-width="3" stroke-linejoin="round"/></svg></span>
           <span class="coach-copy"><span class="coach-kicker">A TIP FOR THIS MOMENT</span><strong id="coachTitle">One move at a time.</strong><span id="coachBody">Start the server to play a game.</span></span>
         </section>
 
         <section class="panel setup-panel" aria-labelledby="setupHeading">
           <div class="panel-heading"><div><span class="panel-eyebrow">YOUR PLAYGROUND</span><h2 id="setupHeading">Set up a game</h2></div><span class="mini-sticker" aria-hidden="true">★</span></div>
-          <div class="form-grid">
+          <div class="form-grid setup-choice">
             <label for="side">Play as<select id="side"><option value="w">White</option><option value="b">Black</option></select></label>
-            <label for="level">Bot level<select id="level"><option value="1">1 · First steps</option><option value="2">2 · Learning</option><option value="3" selected>3 · Confident</option><option value="4">4 · Challenger</option><option value="5">5 · Expert</option></select></label>
-            <label for="time">Time per side<select id="time"><option value="180">3 minutes</option><option value="300">5 minutes</option><option value="600" selected>10 minutes</option><option value="900">15 minutes</option><option value="1800">30 minutes</option></select></label>
-            <label for="increment">Extra per move<select id="increment"><option value="0">None</option><option value="2">+2 seconds</option><option value="5">+5 seconds</option><option value="10">+10 seconds</option></select></label>
+            <p>Unlimited time. The bot uses its strongest built-in setting.</p>
           </div>
           <button type="button" class="button button-primary start-button" id="btnNewCard">Start a new game <span aria-hidden="true">→</span></button>
-          <p class="setup-note">Side, clock and increment apply to the next game. Bot level updates right away.</p>
+          <p class="setup-note">A new game and every page reload restore the standard starting position.</p>
           <details class="preferences" id="preferences">
             <summary>Make it yours <span aria-hidden="true">⌄</span></summary>
             <div class="pref-content">
               <div class="form-grid pref-selects">
                 <label for="boardTheme">Board colors<select id="boardTheme"><option value="duo">Garden green</option><option value="blue">Blue skies</option><option value="sand">Warm sand</option></select></label>
-                <label for="thinkDelay">Bot pause<select id="thinkDelay"><option value="0">Instant</option><option value="0.6" selected>Natural · 0.6s</option><option value="1.5">Relaxed · 1.5s</option></select></label>
+                <label for="thinkDelay">Bot pause<select id="thinkDelay"><option value="0" selected>Instant</option><option value="0.6">Natural · 0.6s</option><option value="1.5">Relaxed · 1.5s</option></select></label>
               </div>
               <div class="switch-list">
                 <label class="switch-row" for="botEnabled"><span>Play against bot<small>Off = local two-player board</small></span><input type="checkbox" id="botEnabled" checked></label>
                 <label class="switch-row" for="coords"><span>Coordinates</span><input type="checkbox" id="coords" checked></label>
                 <label class="switch-row" for="anim"><span>Move animations</span><input type="checkbox" id="anim" checked></label>
                 <label class="switch-row" for="autoQueen"><span>Auto-promote to queen</span><input type="checkbox" id="autoQueen"></label>
-                <label class="switch-row" for="premove"><span>Queue moves while bot thinks</span><input type="checkbox" id="premove" checked></label>
                 <label class="switch-row" for="arrows"><span>Draw board arrows</span><input type="checkbox" id="arrows" checked></label>
               </div>
             </div>

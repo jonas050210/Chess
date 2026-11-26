@@ -48,13 +48,20 @@ export function clockText(seconds) {
   const minutes = Math.floor(value / 60);
   const whole = Math.floor(value % 60);
   if (value < 20) return `${minutes}:${String(whole).padStart(2, '0')}.${Math.floor((value % 1) * 10)}`;
+  if (minutes >= 60) return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}:${String(whole).padStart(2, '0')}`;
   return `${minutes}:${String(whole).padStart(2, '0')}`;
+}
+
+export function moveTimeText(milliseconds) {
+  const ms = Math.round(Math.max(0, milliseconds || 0));
+  return ms < 1000 ? `${(ms / 1000).toFixed(3)} s (${ms} ms)` :
+    `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s (${ms} ms)`;
 }
 
 const STATUS = {
   checkmate: 'Checkmate', stalemate: 'Stalemate', insufficient_material: 'Draw · no mating material',
   seventyfive_moves: 'Draw · 75 moves', fivefold_repetition: 'Draw · fivefold repetition',
-  timeout: 'Time is up', resignation: 'Resignation', agreed_draw: 'Draw agreed',
+  resignation: 'Resignation', agreed_draw: 'Draw agreed',
   claimed_draw: 'Draw claimed', variant_win: 'Game over',
 };
 
@@ -66,7 +73,7 @@ export function gameStatus(state) {
       return state.turn === state.you_color ? 'You are in check!' :
              'Check! Your opponent must respond.';
     }
-    if (state.bot_thinking) return 'Bot is thinking… you can queue a move.';
+    if (state.bot_thinking) return 'Bot is thinking… wait for your turn.';
     if (!state.bot_enabled) return `${state.turn === 'w' ? 'White' : 'Black'} to move`;
     return state.turn === state.you_color ? 'Your move' : 'Opponent to move';
   }
@@ -83,7 +90,6 @@ export function coachMessage(state) {
   }
   if (state.check) return ['First things first: your king.',
                             'You must get out of check. Look for a safe square, a block or a capture.'];
-  if (state.premove) return ['Move queued!', 'It will only play if it is legal after the bot moves.'];
   if (state.bot_thinking) return ['Look one move ahead.',
                                  'While the bot thinks, notice which of your pieces are defended.'];
   if ((state.rules?.can_claim_threefold || state.rules?.can_claim_fifty) &&

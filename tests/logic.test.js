@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {START_FEN, fenToBoard, squareIndex, viewToSquare, squareToView,
-        legalTargets, animationParts, clockText, gameStatus, coachMessage} from '../web/logic.js';
+        legalTargets, animationParts, clockText, moveTimeText,
+        gameStatus, coachMessage} from '../web/logic.js';
 import {pieceSvg, pieceUri} from '../web/pieces.js';
 
 test('a full starting board is read without losing piece colors', () => {
@@ -37,12 +38,15 @@ test('legal markers and status are driven by server state', () => {
   assert.deepEqual(legalTargets(position, 'e2'), ['e3', 'e4']);
   assert.equal(gameStatus(position), 'Your move');
   assert.equal(gameStatus({...position, turn:'b', bot_thinking:true}),
-               'Bot is thinking… you can queue a move.');
+               'Bot is thinking… wait for your turn.');
   assert.equal(gameStatus({...position, bot_enabled:false, status:'check',
                            check:true, turn:'b'}), 'Black is in check!');
   assert.equal(coachMessage({...position, rules:{can_claim_threefold:true}, san:[]})[0],
                'A draw is yours to claim.');
   assert.equal(clockText(19.58), '0:19.5');
+  assert.equal(clockText(3661), '1:01:01');
+  assert.equal(moveTimeText(812), '0.812 s (812 ms)');
+  assert.equal(moveTimeText(2345), '2.35 s (2345 ms)');
 });
 
 test('the twelve pieces are distinct self-contained vector images', () => {
@@ -56,6 +60,24 @@ test('the twelve pieces are distinct self-contained vector images', () => {
     assert.ok(!image.includes('<image '), 'piece must remain vector');
   }
   assert.throws(() => pieceSvg('x'), TypeError);
+});
+
+test('board figures and decorative pawns have no drawn eyes or faces', () => {
+  for (const symbol of ['P', 'p']) {
+    // A pawn has one circle for its round head, never two tiny eye dots.
+    assert.equal((pieceSvg(symbol).match(/<circle\b/g) || []).length, 1);
+  }
+  for (const symbol of ['N', 'n']) {
+    // The horse has a recognizable silhouette and mane, but no facial marks.
+    assert.equal((pieceSvg(symbol).match(/<circle\b/g) || []).length, 0);
+  }
+  const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
+  for (const element of ['brand-mark', 'coach-icon']) {
+    const illustration = html.match(new RegExp(`class="${element}"[\\s\\S]*?<\\/svg>`))?.[0];
+    assert.ok(illustration, `missing ${element} illustration`);
+    assert.equal((illustration.match(/<circle\b/g) || []).length, 2,
+                 `${element}: background and head only, no eye dots`);
+  }
 });
 
 test('web entry point is browser-only and self-hosted', () => {

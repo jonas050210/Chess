@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +17,8 @@ import chess
 
 from ai.baseline import BaselineBot, INF, MATE, _tt_key
 from ai.bot import AIBot, approved_checkpoint
+from ai.checkpoint_lineage import latest_checkpoint, remember_checkpoint
+from ai.model import NumpyPolicyValueNet
 from ai.evaluate import play_game, evaluate_vs_baseline
 from ai.lessons import TRAIN, HOLDOUT, synthetic_lessons, verify_lessons
 from ai.mcts import position_key
@@ -26,36 +28,41 @@ from ai.train_paths import candidate_output
 from server import Session, app, store
 
 
-class ClockTests(unittest.TestCase):
+class TimeTrackingTests(unittest.TestCase):
     def setUp(self):
         self.game = Session()
         self.game.new(bot_enabled=False)
 
-    def test_clock_runs_before_first_move(self):
-        before = self.game.clocks['w']
-        self.game.last_tick = time.time() - .25
-        self.game._tick()
-        self.assertLess(self.game.clocks['w'], before)
+    def test_unlimited_stopwatch_runs_without_flagging(self):
+        self.game.last_tick = self.game.last_move_started_at = time.monotonic() - 3600
+        state = self.game.state()
+        self.assertGreaterEqual(state['elapsed']['w'], 3599)
+        self.assertGreaterEqual(state['game_elapsed'], 3599)
+        self.assertEqual(state['status'], 'playing')
         self.assertFalse(self.game.started)
-
-    def test_first_move_time_is_recorded(self):
-        self.game.last_tick = self.game.last_move_started_at = time.time() - 1
         self.assertTrue(self.game._apply(chess.Move.from_uci('e2e4')))
-        self.assertGreaterEqual(self.game.last_move_ms, 900)
+        self.assertGreaterEqual(self.game.last_move_ms, 3_599_000)
+        self.assertEqual(self.game.state()['status'], 'playing')
 
-    def test_flagged_player_cannot_move(self):
-        self.game.clocks['w'] = .05
-        self.game.last_tick = time.time() - .2
-        self.assertFalse(self.game._apply(chess.Move.from_uci('e2e4')))
-        self.assertEqual(self.game.san_history, [])
-        self.assertEqual(self.game.timed_out['winner'], 'b')
+    def test_each_side_has_total_and_last_move_time(self):
+        self.game.last_tick = self.game.last_move_started_at = time.monotonic() - 1
+        self.assertTrue(self.game._apply(chess.Move.from_uci('e2e4')))
+        self.game.last_tick = self.game.last_move_started_at = time.monotonic() - .25
+        self.assertTrue(self.game._apply(chess.Move.from_uci('e7e5')))
+        state = self.game.state()
+        self.assertGreaterEqual(state['elapsed']['w'], .9)
+        self.assertGreaterEqual(state['elapsed']['b'], .2)
+        self.assertGreaterEqual(state['last_move_by_color']['w'], 900)
+        self.assertGreaterEqual(state['last_move_by_color']['b'], 200)
 
-    def test_flag_draw_when_opponent_cannot_mate(self):
-        self.game.board = chess.Board('4k3/8/8/8/8/8/4Q3/4K3 w - - 0 1')
-        self.game.clocks['w'] = .01
-        self.game.last_tick -= .3
-        self.game._tick()
-        self.assertIsNone(self.game.timed_out['winner'])
+    def test_finished_game_freezes_timer(self):
+        self.game.last_tick -= 5
+        before = self.game.state()['game_elapsed']
+        self.game.result_override = {'status':'agreed_draw', 'winner':None}
+        self.game.last_tick -= 60
+        after = self.game.state()
+        self.assertEqual(after['game_elapsed'], before)
+        self.assertEqual(after['status'], 'agreed_draw')
 
 
 class ApiTests(unittest.TestCase):
@@ -93,6 +100,29 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.post('/api/move', **{'from':'e7','to':'e5',
                                                    'promotion':'k'}).status_code, 400)
 
+    def test_new_game_restores_starting_pieces_and_unlimited_timer(self):
+        self.post('/api/move', **{'from':'e2','to':'e4'})
+        reset = self.post('/api/new', bot_enabled=False)
+        self.assertEqual(reset.status_code, 200)
+        self.assertEqual(reset.json['fen'], chess.STARTING_FEN)
+        self.assertEqual(reset.json['san'], [])
+        self.assertLess(reset.json['game_elapsed'], 1.0)
+        self.assertEqual(reset.json['difficulty'], 5)
+        self.assertNotIn('time_control', reset.json)
+        self.assertNotIn('increment', reset.json)
+        self.assertEqual(self.post('/api/new', difficulty=1).status_code, 400)
+
+    def test_wait_for_bot_cannot_queue_moves(self):
+        self.game.new(bot_enabled=True, think_delay=5)
+        self.assertTrue(self.post('/api/move', **{'from':'e2','to':'e4'}).json['bot_thinking'])
+        self.assertEqual(self.post('/api/premove', **{'from':'g1','to':'f3'}).status_code, 404)
+        self.assertEqual(self.post('/api/move', **{'from':'g1','to':'f3'}).status_code, 400)
+        self.assertEqual(self.post('/api/move', **{'from':'g1','to':'f3',
+                                                 'premove':True}).status_code, 400)
+        state = self.client.get('/api/state').json
+        self.assertEqual(state['san'], ['e4'])
+        self.assertNotIn('premove', state)
+
     def test_reject_cross_origin_malformed_and_bogus_settings(self):
         simple = self.client.post('/api/new', data='{}', content_type='text/plain')
         self.assertEqual(simple.status_code, 415)
@@ -101,9 +131,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(cross.status_code, 403)
         host = self.client.post('/api/new', json={}, headers={'Host':'attacker.example'})
         self.assertEqual(host.status_code, 400)
-        self.assertEqual(self.post('/api/settings', difficulty='bad').status_code, 400)
+        self.assertEqual(self.post('/api/settings', difficulty=5).status_code, 400)
         self.assertEqual(self.post('/api/settings', bot_enabled='false').status_code, 400)
-        self.assertEqual(self.post('/api/settings', time_control=float('inf')).status_code, 400)
+        self.assertEqual(self.post('/api/settings', time_control=600).status_code, 400)
+        self.assertEqual(self.post('/api/settings', increment=0).status_code, 400)
+        self.assertEqual(self.post('/api/settings', settings={'premove':True}).status_code, 400)
         self.assertEqual(self.post('/api/settings', settings={'theme':{'fake':'duo'}}).status_code, 400)
         self.assertEqual(self.post('/api/move', **{'from':'e2','to':'e4','promotion':[]}).status_code, 400)
         self.assertFalse(self.game.bot_enabled)
@@ -145,22 +177,16 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(status['rules']['can_claim_fifty'])
         self.assertEqual(self.post('/api/claim_draw').json['status'], 'claimed_draw')
 
-    def test_expired_clock_prevents_late_draw_and_abort(self):
-        self.game.new(bot_enabled=False, time_control=30)
+    def test_even_after_long_thinking_time_a_draw_can_be_claimed(self):
+        self.game.new(bot_enabled=False)
         with self.game.lock:
             self.game.board = chess.Board('r3k3/8/8/8/8/8/8/4K3 w - - 99 1')
             self.assertTrue(self.game.board.can_claim_fifty_moves())
-            self.game.clocks['w'] = .01
-            self.game.last_tick -= .15
-            self.game.last_draw_offer = 'pending'
-            self.game.draw_offered_by = 'b'
-        self.assertEqual(self.post('/api/claim_draw').status_code, 400)
-        result = self.client.get('/api/state').json
-        self.assertEqual(result['status'], 'timeout')
-        self.assertEqual(result['winner'], 'b')
-        self.assertEqual(self.post('/api/agree_draw', color='w').status_code, 400)
-        self.assertEqual(self.post('/api/offer_draw', color='w').status_code, 400)
-        self.assertEqual(self.post('/api/abort').status_code, 400)
+            self.game.last_tick -= 10_000
+        state = self.client.get('/api/state').json
+        self.assertEqual(state['status'], 'playing')
+        self.assertGreater(state['elapsed']['w'], 9_999)
+        self.assertEqual(self.post('/api/claim_draw').json['status'], 'claimed_draw')
 
     def test_bot_draw_claim_only_on_human_turn(self):
         self.game.new(bot_enabled=True, you_color='w')
@@ -192,21 +218,25 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.post('/api/agree_draw', color='b').status_code, 400)
         self.assertEqual(self.post('/api/offer_draw').json['draw_offer'], 'declined')
 
-    def test_undo_restores_clocks_increments_and_finished_result(self):
-        self.game.new(bot_enabled=False, increment=2)
+    def test_undo_keeps_cumulative_side_and_game_time_but_rewinds_move_history(self):
+        self.game.new(bot_enabled=False)
         with self.game.lock:
-            before = dict(self.game.clocks)
-            self.game.last_tick -= 5
+            before = dict(self.game.elapsed)
+            self.game.last_tick = self.game.last_move_started_at = time.monotonic() - 5
         move = self.post('/api/move', **{'from':'e2','to':'e4'})
-        self.assertLess(move.json['clocks']['w'], before['w'])
+        self.assertGreater(move.json['elapsed']['w'], before['w'] + 4.9)
+        self.assertGreater(move.json['last_move_by_color']['w'], 4900)
         with self.game.lock:
-            self.game.clocks['b'] = .01
-            self.game.last_tick -= .4
-        self.assertEqual(self.client.get('/api/state').json['status'], 'timeout')
+            self.game.result_override = {'status':'agreed_draw', 'winner':None}
+        self.assertEqual(self.client.get('/api/state').json['status'], 'agreed_draw')
         undo = self.post('/api/undo')
         self.assertEqual(undo.json['status'], 'playing')
         self.assertEqual(undo.json['san'], [])
-        self.assertAlmostEqual(undo.json['clocks']['w'], before['w'], delta=.1)
+        self.assertGreaterEqual(undo.json['elapsed']['w'], move.json['elapsed']['w'])
+        self.assertGreaterEqual(undo.json['game_elapsed'], move.json['game_elapsed'])
+        self.assertAlmostEqual(sum(undo.json['elapsed'].values()),
+                               undo.json['game_elapsed'], delta=.03)
+        self.assertIsNone(undo.json['last_move_by_color']['w'])
         stats = self.client.get('/api/stats').json
         self.assertEqual(stats['games'], 0)
         self.assertEqual(stats['moves']['user_game'], 0)
@@ -351,6 +381,40 @@ class TrainingTests(unittest.TestCase):
         self.assertGreater(len(synthetic), 100)
         self.assertGreater(len(rows(TRAIN + synthetic, augment=True)[0]), len(synthetic))
 
+    def test_next_training_run_resumes_last_successful_compatible_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            first, later = directory / 'first.npz', directory / 'later.npz'
+            NumpyPolicyValueNet(seed=1).save(str(first))
+            NumpyPolicyValueNet(seed=2).save(str(later))
+            os.utime(first, (1, 1))
+            os.utime(later, (2, 2))
+            self.assertEqual(latest_checkpoint(directory, '.npz'), later)
+            remember_checkpoint(directory, first)
+            self.assertEqual(latest_checkpoint(directory, '.npz'), first)
+            self.assertEqual(json.loads((directory / 'latest.json').read_text())['.npz']['path'],
+                             'first.npz')
+            first.write_bytes(b'corrupted')
+            with self.assertRaisesRegex(ValueError, 'missing or changed'):
+                latest_checkpoint(directory, '.npz')
+            # A known last checkpoint must not silently fall back to older weights.
+            self.assertTrue(later.exists())
+
+    def test_failed_first_cli_stage_cannot_become_a_resume_checkpoint(self):
+        from ai import train_cli
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            output = directory / 'failed.npz'
+            arguments = ['ai/train_cli.py', '--preset', 'tactics', '--tactics-positions', '0',
+                         '--tactics-mates', '0', '--no-promote', '--strict',
+                         '--out', str(output)]
+            with patch.object(train_cli, 'CANDIDATES', directory), \
+                    patch.object(sys, 'argv', arguments), redirect_stderr(io.StringIO()), \
+                    redirect_stdout(io.StringIO()):
+                self.assertNotEqual(train_cli.main(), 0)
+            self.assertFalse(output.exists())
+            self.assertIsNone(latest_checkpoint(directory, '.npz'))
+
     def test_arena_deadline_after_a_slow_move_is_unfinished(self):
         deadline = time.monotonic() + .001
         def slow_legal(board):
@@ -418,6 +482,11 @@ class TrainingTests(unittest.TestCase):
                                     '--report', str(approved)], cwd=ROOT,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             self.assertEqual(guard.returncode, 2)
+            index_guard = subprocess.run([sys.executable, 'ai/train_cli.py', '--dry-run',
+                                          '--report', 'checkpoints/candidates/latest.json'],
+                                         cwd=ROOT, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, text=True)
+            self.assertEqual(index_guard.returncode, 2)
             resume = tmp / 'unrelated.pt'
             resume.write_bytes(b'not a model')
             mismatched = subprocess.run([sys.executable, 'ai/train_cli.py', '--dry-run',
@@ -434,10 +503,13 @@ class TrainingTests(unittest.TestCase):
             active.write_bytes(b'old checkpoint')
             atomic_copy(candidate, active)
             self.assertEqual(active.read_bytes(), b'new checkpoint')
-            receipt = approve_checkpoint(active, {'paired_games':32}, 'demo')
+            gate = {'paired_games':32, 'baseline_level':5, 'passed':True}
+            receipt = approve_checkpoint(active, gate, 'demo')
             self.assertTrue(approved_checkpoint(str(active)))
             self.assertEqual(json.loads(receipt.read_text())['gate']['paired_games'], 32)
             active.write_bytes(b'tampered model')
+            self.assertFalse(approved_checkpoint(str(active)))
+            approve_checkpoint(active, {'paired_games':32, 'baseline_level':2, 'passed':True}, 'legacy')
             self.assertFalse(approved_checkpoint(str(active)))
 
     def test_failed_copy_leaves_active_checkpoint_untouched(self):

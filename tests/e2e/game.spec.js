@@ -17,6 +17,60 @@ test('self-hosted SVG pieces render sharply and the board fits the screen', asyn
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBeTruthy();
 });
 
+test('unlimited time and the left stopwatch remain visible in fullscreen', async ({page}) => {
+  await expect(page.locator('#level, #time, #increment, #premove')).toHaveCount(0);
+  await expect(page.locator('#botTimeLabel')).toHaveText('Bot · Black');
+  await expect(page.locator('#gameTime')).toContainText(':');
+  await expect(page.locator('#yourTime')).toContainText(':');
+  await page.locator('#btnFullscreen').click();
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement?.id)).toBe('playArea');
+  await expect(page.locator('#botTime')).toBeVisible();
+  await expect(page.locator('#gameTime')).toBeVisible();
+  await expect(page.locator('#yourTime')).toBeVisible();
+  const board = await page.locator('#board').boundingBox();
+  const times = await page.locator('#gameTime').boundingBox();
+  expect(board.y + board.height).toBeLessThanOrEqual(page.viewportSize().height);
+  expect(times.x + times.width).toBeLessThan(board.x); // on desktop, the panel is left of the board
+  await page.locator('#btnFullscreen').click();
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement)).toBeNull();
+});
+
+test('mobile fullscreen keeps the board and all three elapsed times together', async ({page}) => {
+  await page.setViewportSize({width:390, height:780});
+  await page.locator('#btnFullscreen').click();
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement?.id)).toBe('playArea');
+  for (const id of ['board', 'botTime', 'gameTime', 'yourTime']) {
+    const box = await page.locator(`#${id}`).boundingBox();
+    expect(box.y + box.height).toBeLessThanOrEqual(780);
+  }
+  expect(await page.evaluate(() => document.querySelector('#playArea').scrollWidth <= innerWidth)).toBeTruthy();
+});
+
+test('reload restores the normal setup and new games reset the stopwatch', async ({page}) => {
+  await page.locator('#preferences').evaluate(element => { element.open = true; });
+  await page.locator('#botEnabled').uncheck();
+  await page.locator('#btnNewCard').click();
+  await page.locator('[data-square="e2"]').click();
+  await page.locator('[data-square="e4"]').click();
+  await expect(page.locator('#moveCount')).toHaveText('1 move');
+  await expect(page.locator('#yourLastMove')).toHaveText(/Last move [\d.]+ s \(\d+ ms\)/);
+  await page.locator('#btnNewTop').click();
+  await expect(page.locator('#moveCount')).toHaveText('0 moves');
+  await expect(page.locator('[data-square="e2"]')).toHaveAttribute('aria-label', 'e2, white pawn');
+  await expect(page.locator('#yourLastMove')).toHaveText('Last move —');
+  const reset = await (await page.request.get('/api/state')).json();
+  expect(reset.game_elapsed).toBeLessThan(1.5);
+  await page.locator('[data-square="e2"]').click();
+  await page.locator('[data-square="e4"]').click();
+  await expect(page.locator('#moveCount')).toHaveText('1 move');
+  await page.reload();
+  await expect(page.locator('#connectionBadge')).toHaveClass(/online/);
+  await expect(page.locator('#moveCount')).toHaveText('0 moves');
+  await expect(page.locator('[data-square="e2"]')).toHaveAttribute('aria-label', 'e2, white pawn');
+  await expect(page.locator('[data-square="e4"]')).toHaveAttribute('aria-label', 'e4, empty');
+  await expect(page.locator('#yourLastMove')).toHaveText('Last move —');
+});
+
 test('local game moves, undo restores it, and keyboard shortcuts work', async ({page}) => {
   await page.locator('#preferences').evaluate(element => { element.open = true; });
   await page.locator('#botEnabled').uncheck();
@@ -105,7 +159,7 @@ test('board annotations clear and PGN downloads actual moves', async ({page}) =>
   expect(text).toContain('1. e4 *');
 });
 
-test('the bot can be interrupted and a legal premove can be queued', async ({page}) => {
+test('the bot turn rejects queued moves and undo still cancels its search', async ({page}) => {
   await page.locator('#preferences').evaluate(element => { element.open = true; });
   await page.locator('#thinkDelay').selectOption('1.5');
   await page.locator('#btnNewTop').click();
@@ -114,15 +168,13 @@ test('the bot can be interrupted and a legal premove can be queued', async ({pag
   await expect(page.locator('#matchTag')).toHaveText('BOT IS THINKING');
   await page.locator('[data-square="g1"]').click();
   await page.locator('[data-square="f3"]').click();
-  await expect(page.locator('#statusSubtitle')).toContainText('Queued: G1F3');
-  await expect(page.locator('#moveCount')).toHaveText('3 moves', {timeout:15_000});
-  await expect(page.locator('[data-square="f3"] .piece')).toBeVisible();
-  await page.locator('#btnNewTop').click();
-  await page.locator('[data-square="d2"]').click();
-  await page.locator('[data-square="d4"]').click();
-  await expect(page.locator('#matchTag')).toHaveText('BOT IS THINKING');
+  await expect(page.locator('[data-square="g1"]')).not.toHaveClass(/selected/);
+  expect((await page.request.post('/api/premove', {data:{from:'g1',to:'f3'}})).status()).toBe(404);
+  expect((await page.request.post('/api/move', {data:{from:'g1',to:'f3',premove:true}})).status()).toBe(400);
+  await expect(page.locator('#moveCount')).toHaveText('1 move');
   await page.locator('#btnUndo').click();
   await expect(page.locator('#moveCount')).toHaveText('0 moves');
+  await expect(page.locator('[data-square="e2"] .piece')).toBeVisible();
 });
 
 test('touchscreen taps can play on a narrow board', async ({browser}) => {

@@ -9,35 +9,51 @@ python ai/train_cli.py --dry-run
 python ai/train_cli.py --preset basics --basics-epochs 60 --max-seconds 120 --no-promote
 ```
 
-`--dry-run` prints commands and writes **nothing**. The second command trains on a small curated curriculum, checks it on disjoint held-out positions and, if time remains, runs a paired evaluation. It cannot replace the active checkpoint because of `--no-promote`; the JSON report still includes whether the completed-game gate *would* pass. Reports and `.npz`/`.pt` candidates live in ignored `checkpoints/candidates/`.
+`--dry-run` prints the commands and **which checkpoint will be resumed**, but writes nothing. The second command trains on a curated curriculum, checks disjoint held-out positions and, if time remains, runs a paired evaluation. It cannot replace the active checkpoint because of `--no-promote`; the JSON report still includes whether a *completed* gate would pass. Reports and `.npz`/`.pt` candidates live in ignored `checkpoints/candidates/`.
+
+### Continue training from the last checkpoint
+
+**Use `ai/train_cli.py` for successive runs.** Each run automatically loads the most recently **successfully saved compatible candidate**, not the original checkpoint. When no candidate exists, CPU runs start from the existing active NumPy checkpoint; GPU runs start from the active Torch checkpoint if one exists, otherwise from a fresh initialized Torch model. NumPy (`.npz`) and PyTorch (`.pt`) histories are separate. CPU pipeline stages (basics → smoke → tactics) each write a different output, and each completed stage becomes the next stage's start. A failed/unfinished stage does **not** replace the last good pointer. The CLI stores the last successful path and its SHA-256 in `checkpoints/candidates/latest.json`; if that file points to missing or changed weights, the CLI stops instead of silently starting from older weights. Older candidate folders without an index use their newest compatible candidate once, then acquire an index after the first successful stage. The run report includes `resumed_from` and `lineage`.
+
+```bash
+python ai/train_cli.py --preset tactics --tactics-positions 60 --tactics-epochs 30 --max-seconds 300 --no-promote
+python ai/train_cli.py --preset basics --basics-epochs 60 --max-seconds 120 --no-promote
+python ai/train_cli.py --preset cpu --max-seconds 900 --eval-games 32
+# Optional: explicitly choose compatible weights if the recorded checkpoint was lost:
+python ai/train_cli.py --preset tactics --resume checkpoints/candidates/your-saved-file.npz --dry-run
+```
+
+This resumes **model weights**, not the optimizer's momenta, RNG/replay buffer state, or an interrupted epoch. Each invocation starts new self-play games and new generated positions; `--seed` makes sampling repeatable. `--out` gives a new candidate path, **not** a source checkpoint; use `--resume` to specify the source. Stand-alone `ai/train_*.py` scripts create candidate files but do **not** manage the CLI's lineage/gate: for reliable continued training and any promotion, use `ai/train_cli.py`. Do not manually edit `latest.json`; if your previous weights are gone, restore them or specify a trusted compatible `--resume` path. The candidate checkpoint path may be outside the ignored directory only when you explicitly choose `--out`.
 
 ## Presets
 
 | Preset | Work |
 |---|---|
 | `basics` | Supervise curated moves plus ~220 legal synthetic capture/promotion/en-passant setups (including color/file augmentation); balance patterns during training and print eight-position held-out accuracy |
-| `smoke` | Short CPU self-play sanity check |
-| `tactics` | Distill tactical positions from the search engine; prints held-out mates separately from memorized training examples |
-| `cpu` | `basics` → `smoke` → `tactics` |
+| `smoke` | Short CPU self-play: collect complete sequences, then update policy/value on their move/outcome examples. Three small games by default are a sanity check, not meaningful strategy mastery |
+| `tactics` | Generate tactical positions from random legal play, distill depth-2 search's top moves and mate-in-one examples; its training-set mate check is not independent strength evidence |
+| `cpu` | `basics` → `smoke` → `tactics`, each continuing from the last successful stage |
 | `gpu` | Explicit PyTorch self-play; CPU is possible but much slower |
 | `auto` | CPU steps, then GPU only if CUDA is available |
 | `eval` | Score the existing active checkpoint only; no training or promotion |
 
-Use `--max-seconds N` to bound steps and Arena play (a single already-started move may finish after the deadline). `--strict` returns immediately on a failed subprocess; non-strict runs can continue, but **no failed run promotes a candidate**. `--seed` and `--eval-seed` control reproducibility. `--resume` must exist and match the checkpoint type trained by the preset. `--out` cannot point at an active checkpoint; stand-alone trainers also reject wrong formats and symlink aliases. On a 2 GB machine stick to `basics`/`smoke` or use the play-only `CHESS_LOW_RAM=1` server mode.
+Tactics are learned by comparing the network's choices with a search teacher on short tactical positions; strategic judgment comes from bounded self-play plus its value targets, not from a magic strength switch. With a tiny network, sparse examples and few games, longer training may overfit and even **decrease** playing strength. Inspect the held-out fundamentals, tactics and completed Arena games rather than training loss alone. Use `--tactics-positions`, `--tactics-epochs`, `--smoke-games` and `--games` to scale samples; for broader strategic improvement you need more diverse games and independent evaluation.
+
+Use `--max-seconds N` to bound steps and Arena play (a single already-started move may finish after the deadline). `--strict` returns immediately on a failed subprocess; non-strict runs can continue, but **no failed run promotes a candidate**. `--seed` and `--eval-seed` control reproducibility. `--resume` must exist and match the checkpoint type trained by the preset. `--out` cannot point at an active checkpoint; stand-alone trainers also reject wrong formats and symlink aliases. On a 2 GB machine stick to `basics`/`smoke` or use the play-only `CHESS_LOW_RAM=1` server mode. All training happens in the **terminal**, never in the web UI.
 
 ## Promotion is intentionally hard
 
 When promotion is permitted, the CLI:
 
-1. Evaluates active and candidate models against the same level-2 search opponent, same opening set and alternating colors.
+1. Evaluates active and candidate models against the same **level-5 search opponent** (the strongest built-in playing setting), same opening set and alternating colors. For training presets, `--baseline-level` may be set lower only with `--no-promote` for experiments (`--preset eval` never promotes); a level-2 approval cannot replace the level-5 live bot.
 2. Counts an illegal/absent move as a **loss**, never a draw. A game stopped by a ply or wall-time cap is **unfinished** and is excluded from both scoring and matched pairs.
 3. Scores the **held-out** lessons; a training-set mate check is not a strength metric.
 4. Requires >=12 completed matched games, candidate score lower 95% bound >= `--min-score` (default 0.55), paired gain lower 95% bound >= `--min-delta` (default 0.05), and fundamentals held-out accuracy >= `--min-basics-accuracy` (default 0.5). A NumPy candidate cannot displace an already approved Torch model.
-5. Copies the old active checkpoint into `checkpoints/archive/`, atomically replaces it, then writes `model.approved.json` or `model_torch.approved.json` with its SHA-256 and gate report. The server checks the hash on startup; a partial/stale receipt cannot activate the model. **Restart the server** after a promotion.
+5. Copies the old active checkpoint into `checkpoints/archive/`, atomically replaces it, then writes `model.approved.json` or `model_torch.approved.json` with its SHA-256 and gate report. The server checks the hash, a passed gate, and the level-5 opponent on startup; a partial/stale receipt or old weaker-level approval cannot activate the model. **Restart the server** after a promotion.
 
 With only 12–32 games, conservative one-sided 95% Hoeffding bounds on completed game scores and paired gains are a regression check, not proof of a chess rating. For credible strength gains, use far more finished paired games, separate tactical suites, stronger opponents and repeated seeds. Set `--no-promote` while experimenting.
 
-**Observed sandbox run (2026-11-26):** `--preset basics --basics-epochs 60 --max-seconds 120 --eval-games 12 --eval-sims 8 --strict --no-promote` completed; the NumPy candidate scored **1/8 held-out** (unchanged) and **lost all 12 completed Arena games** against the level-2 search engine. The original checkpoint lost 11 games with one unfinished. The candidate was **not promoted**. This result is deliberately reported rather than described as a strong bot: the search engine is the reliable default until a candidate actually passes. A tiny smoke self-play run (14 positions) and tactics run (13 positions) also produced loadable *candidate* files, not promotion evidence.
+**Observed sandbox run (2026-11-26):** A *historical* `--preset basics --basics-epochs 60 --max-seconds 120 --eval-games 12 --eval-sims 8 --strict --no-promote` experiment scored **1/8 held-out** (unchanged) and **lost all 12 completed Arena games** against the then-default level-2 opponent. The original checkpoint lost 11 games with one unfinished. The candidate was **not promoted**. This is *not* a level-5 result. A tiny smoke self-play run (14 positions) and tactics run (13 positions) also produced loadable *candidate* files, not promotion evidence. After enabling automatic resume, two fresh terminal-only, six-second basics runs in an isolated copy of the checkpoints confirmed that the second resumed the first's saved candidate; both ran out of budget during the Arena and **neither promoted**. The live bot remains the level-5 search engine until a candidate genuinely passes its new gate.
 
 ## GPU (optional, not verified in this workspace)
 

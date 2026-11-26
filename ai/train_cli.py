@@ -31,6 +31,7 @@ ACTIVE_NPZ = CKPT / "model.npz"
 ACTIVE_PT = CKPT / "model_torch.pt"
 
 from ai.model import HAS_TORCH  # noqa: E402
+from ai.checkpoint_lineage import latest_checkpoint, remember_checkpoint, validate  # noqa: E402
 
 
 def detect_device(requested: str) -> tuple[str, bool]:
@@ -89,7 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="minimum 12 completed paired games for promotion")
     parser.add_argument("--eval-sims", type=int, default=25)
     parser.add_argument("--eval-seed", type=int, default=1701)
-    parser.add_argument("--baseline-level", type=int, default=2)
+    parser.add_argument("--baseline-level", type=int, default=5,
+                        help="promotion must beat the strongest playing search (level 5)")
     parser.add_argument("--min-score", type=float, default=.55)
     parser.add_argument("--min-delta", type=float, default=.05)
     parser.add_argument("--min-basics-accuracy", type=float, default=.5)
@@ -239,6 +241,8 @@ def main() -> int:
             not 0 <= args.min_score <= 1 or not -1 <= args.min_delta <= 1 or
             not 0 <= args.min_basics_accuracy <= 1):
         parser.error("Invalid training budget, evaluation count, level or promotion threshold")
+    if args.baseline_level != 5 and not args.no_promote and args.preset != "eval":
+        parser.error("Promotion requires --baseline-level 5; use --no-promote for weaker comparisons")
     start = time.monotonic()
     deadline = start + args.max_seconds if args.max_seconds else None
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
@@ -248,8 +252,9 @@ def main() -> int:
         parser.error("--out must be a candidate .npz path, not an active checkpoint")
     report_path = Path(args.report).resolve() if args.report else CANDIDATES / f"{run_id}.json"
     if (report_path.suffix != ".json" or report_path in
-            (ACTIVE_NPZ.with_suffix(".approved.json"), ACTIVE_PT.with_suffix(".approved.json"))):
-        parser.error("--report must be a JSON report, not a model approval receipt")
+            (ACTIVE_NPZ.with_suffix(".approved.json"), ACTIVE_PT.with_suffix(".approved.json"),
+             (CANDIDATES / "latest.json").resolve())):
+        parser.error("--report must be a JSON report, not a model approval receipt or lineage index")
     resume = Path(args.resume).resolve() if args.resume else None
     if resume and (not resume.exists() or resume.suffix not in (".npz", ".pt")):
         parser.error("--resume must name an existing .npz or .pt checkpoint")
@@ -262,23 +267,49 @@ def main() -> int:
                        s in steps for s in ("basics", "smoke", "tactics"))) or
                    (resume.suffix == ".pt" and "gpu" not in steps)):
         parser.error("--resume must match a checkpoint format trained by this preset")
+    try:
+        if resume:
+            validate(resume)
+        last_npz = (latest_checkpoint(CANDIDATES, ".npz")
+                    if any(step in steps for step in ("basics", "smoke", "tactics"))
+                    and (not resume or resume.suffix != ".npz") else None)
+        last_pt = (latest_checkpoint(CANDIDATES, ".pt")
+                   if "gpu" in steps and (not resume or resume.suffix != ".pt") else None)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        parser.error(f"Cannot resume from last checkpoint: {exc}")
     start_npz = resume if resume and resume.suffix == ".npz" else (
-        ACTIVE_NPZ if ACTIVE_NPZ.exists() else None)
+        last_npz or (ACTIVE_NPZ if ACTIVE_NPZ.exists() else None))
     resume_pt = resume if resume and resume.suffix == ".pt" else (
-        ACTIVE_PT if ACTIVE_PT.exists() else None)
+        last_pt or (ACTIVE_PT if ACTIVE_PT.exists() else None))
+    cpu_steps = [step for step in steps if step in ("basics", "smoke", "tactics")]
+    # Each stage writes a fresh file. A failed later stage can never overwrite
+    # the last successful candidate that the next run must resume from.
+    cpu_paths = {step: npz if step == cpu_steps[-1] else
+                 npz.with_name(f"{npz.stem}.{step}.npz") for step in cpu_steps}
+    if any(path.exists() for path in cpu_paths.values()):
+        parser.error("--out/stage output already exists; omit --out or choose a new path")
+    if "gpu" in steps and pt.exists():
+        parser.error("Torch output already exists; choose a new --out path")
 
     def remaining() -> int:
         return 0 if deadline is None else max(0, math.ceil(deadline - time.monotonic()))
 
-    commands = [cmd_for(step, args, npz, pt, device, remaining(), resume_pt)
-                for step in steps]
+    commands = [cmd_for(step, args, cpu_paths.get(step, npz), pt, device,
+                        remaining(), resume_pt) for step in steps]
     report: dict = {"run_id": run_id, "preset": args.preset, "device": device,
                     "torch": HAS_TORCH, "cuda": cuda, "dry_run": args.dry_run,
                     "max_seconds": args.max_seconds, "seed": args.seed,
+                    "resumed_from": {"numpy": str(start_npz) if start_npz else None,
+                                     "torch": str(resume_pt) if resume_pt else None},
                     "steps": [{"name": s, "cmd": c} for s, c in zip(steps, commands)],
-                    "candidates": [], "promoted": False}
+                    "lineage": [], "candidates": [], "promoted": False}
     print(f"== Chess training · terminal only ==\nrun={run_id} steps={steps or ['eval']} "
           f"device={device} budget={args.max_seconds or 'unlimited'}s", flush=True)
+    for kind, source in report["resumed_from"].items():
+        if ((kind == "numpy" and cpu_steps) or (kind == "torch" and "gpu" in steps)):
+            print(f"{kind} weights: resuming from {source}" if source else
+                  f"{kind} weights: no prior compatible checkpoint; initial model required",
+                  flush=True)
     if args.dry_run:
         for command in commands:
             print("$ " + " ".join(command))
@@ -296,16 +327,33 @@ def main() -> int:
         print(f"{reason} · report={report_path}", flush=True)
         return code
 
-    if any(step in steps for step in ("basics", "smoke", "tactics")) and not npz.exists():
-        if start_npz:
-            shutil.copy2(start_npz, npz)
-            print(f"Starting candidate copied from {start_npz}", flush=True)
-
     executed = []
+    latest_cpu = start_npz
+    cpu_failed = False
+
+    def discard_failed_output(step: str) -> None:
+        # The output did not exist before this run. A copied start checkpoint
+        # or a half-written file must not look like a successful legacy candidate
+        # if this was the first run (before latest.json exists).
+        output = cpu_paths.get(step, pt if step == "gpu" else None)
+        if output:
+            output.unlink(missing_ok=True)
+
     for step, command in zip(steps, commands):
         if deadline is not None and remaining() <= 0:
             executed.append({"name": step, "cmd": command, "rc": None, "skipped": "budget"})
             continue
+        if cpu_failed and step in cpu_paths:
+            executed.append({"name": step, "cmd": command, "rc": None,
+                             "skipped": "previous CPU stage failed"})
+            continue
+        if step in cpu_paths and latest_cpu:
+            try:
+                shutil.copy2(latest_cpu, cpu_paths[step])
+            except OSError as error:
+                report["steps"] = executed
+                return finish(f"Could not copy last checkpoint {latest_cpu}: {error}; no promotion", 1)
+            print(f"Starting {step} from {latest_cpu}", flush=True)
         if deadline is not None:
             index = command.index("--max-seconds") + 1
             command[index] = str(remaining())
@@ -314,10 +362,25 @@ def main() -> int:
                           timeout=max(.1, deadline - time.monotonic()) if deadline else None)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
             rc = error.returncode if isinstance(error, subprocess.CalledProcessError) else 124
+            discard_failed_output(step)
             executed.append({"name": step, "cmd": command, "rc": rc, "skipped": None})
             report["steps"] = executed
             return finish(f"Strict mode: {step} failed (rc={rc}); no promotion", rc)
         executed.append({"name": step, "cmd": command, "rc": rc, "skipped": None})
+        if rc:
+            discard_failed_output(step)
+            cpu_failed |= step in cpu_paths
+            continue
+        completed = pt if step == "gpu" else cpu_paths[step]
+        try:
+            remember_checkpoint(CANDIDATES, completed)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            discard_failed_output(step)
+            report["steps"] = executed
+            return finish(f"Could not validate completed {step} checkpoint: {error}; no promotion", 1)
+        report["lineage"].append({"step": step, "path": str(completed)})
+        if step in cpu_paths:
+            latest_cpu = completed
     report["steps"] = executed
     successful = {item["name"] for item in executed if item["rc"] == 0}
     failed = any(item["rc"] not in (0, None) for item in executed)
@@ -354,7 +417,8 @@ def main() -> int:
 
     best_path, best = max(trained, key=lambda item: item[1]["score_lower95"])
     delta, lower, count = paired_delta(best, current)
-    gate = {"paired_games": count, "mean_delta": round(delta, 3),
+    gate = {"paired_games": count, "baseline_level": args.baseline_level,
+            "mean_delta": round(delta, 3),
             "delta_lower95": round(lower, 3) if count >= 2 else None,
             "candidate_score_lower95": best["score_lower95"],
             "basics_holdout": best["basics_holdout"],
