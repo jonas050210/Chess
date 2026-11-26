@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {START_FEN, fenToBoard, squareIndex, viewToSquare, squareToView,
-        legalTargets, animationParts, clockText, gameStatus, coachMessage} from '../web/logic.js';
+        legalTargets, animationParts, clockText, moveTimeText,
+        gameStatus, coachMessage} from '../web/logic.js';
 import {pieceSvg, pieceUri} from '../web/pieces.js';
 
 test('a full starting board is read without losing piece colors', () => {
@@ -37,12 +38,15 @@ test('legal markers and status are driven by server state', () => {
   assert.deepEqual(legalTargets(position, 'e2'), ['e3', 'e4']);
   assert.equal(gameStatus(position), 'Your move');
   assert.equal(gameStatus({...position, turn:'b', bot_thinking:true}),
-               'Bot is thinking… you can queue a move.');
+               'Bot is thinking… wait for your turn.');
   assert.equal(gameStatus({...position, bot_enabled:false, status:'check',
                            check:true, turn:'b'}), 'Black is in check!');
   assert.equal(coachMessage({...position, rules:{can_claim_threefold:true}, san:[]})[0],
                'A draw is yours to claim.');
   assert.equal(clockText(19.58), '0:19.5');
+  assert.equal(clockText(3661), '1:01:01');
+  assert.equal(moveTimeText(812), '0.812 s (812 ms)');
+  assert.equal(moveTimeText(2345), '2.35 s (2345 ms)');
 });
 
 test('the twelve pieces are distinct self-contained vector images', () => {

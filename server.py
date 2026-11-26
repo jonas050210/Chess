@@ -47,10 +47,11 @@ PROMO_MAP = {"q": chess.QUEEN, "r": chess.ROOK,
              "b": chess.BISHOP, "n": chess.KNIGHT}
 THEMES = {"duo", "green", "blue", "brown", "sand", "midnight"}
 HIGHLIGHTS = {"yellow", "blue", "red"}
-BOOL_SETTINGS = {"coords", "animation", "auto_queen", "premove", "texture", "arrows", "flip"}
+BOOL_SETTINGS = {"coords", "animation", "auto_queen", "texture", "arrows", "flip"}
 VIEW_SETTINGS = BOOL_SETTINGS | {"theme", "highlight"}
-CONFIG_FIELDS = VIEW_SETTINGS | {"difficulty", "bot_enabled", "think_delay",
-                                 "time_control", "increment", "settings"}
+CONFIG_FIELDS = VIEW_SETTINGS | {"bot_enabled", "think_delay", "settings"}
+# One strongest built-in, bounded search setting. No strength/clock settings in games.
+PLAY_LEVEL = 5
 
 
 def captured_material(board: chess.Board) -> dict:
@@ -124,21 +125,15 @@ def validated_config(data: dict) -> dict:
         elif key == "highlight" and (not isinstance(value, str) or value not in HIGHLIGHTS):
             raise ValueError("Invalid highlight color")
     result["settings"] = options
-    if "difficulty" in data:
-        result["difficulty"] = number(data["difficulty"], "difficulty", 1, 5, True)
     if "bot_enabled" in data:
         result["bot_enabled"] = boolean(data["bot_enabled"], "bot_enabled")
     if "think_delay" in data:
         result["think_delay"] = number(data["think_delay"], "think_delay", 0, 5)
-    if "time_control" in data:
-        result["time_control"] = number(data["time_control"], "time_control", 30, 86400)
-    if "increment" in data:
-        result["increment"] = number(data["increment"], "increment", 0, 30)
     return result
 
 
 class Session:
-    """One browser's game. Mutable board/clock state is guarded by self.lock."""
+    """One browser's game. Mutable board/stopwatch state is guarded by self.lock."""
 
     def __init__(self):
         self.lock = threading.RLock()
@@ -154,52 +149,44 @@ class Session:
         self.engine_epoch = 0
         self.searched_epoch = -1
         self.settings = {"theme": "duo", "highlight": "yellow", "coords": True,
-                         "animation": True, "auto_queen": False, "premove": True,
+                         "animation": True, "auto_queen": False,
                          "texture": False, "arrows": True, "flip": False}
         self.new()
 
     def _finished(self) -> bool:
         # A *claimable* threefold/50-move draw must never end the game by itself.
-        return (self.result_override is not None or self.timed_out is not None or
+        return (self.result_override is not None or
                 self.board.outcome(claim_draw=False) is not None)
 
     def _tick(self):
-        now = time.time()
-        elapsed = max(0.0, now - self.last_tick)
+        # Wall clocks can jump when the OS synchronizes time; stopwatches cannot.
+        now = time.monotonic()
+        delta = max(0.0, now - self.last_tick)
         self.last_tick = now
-        if self.clock_started and not self._finished():
+        if not self._finished():
             color = "w" if self.board.turn else "b"
-            self.clocks[color] = max(0.0, self.clocks[color] - elapsed)
-            if self.clocks[color] <= 0:
-                opponent = not self.board.turn
-                winner = None if self.board.has_insufficient_material(opponent) else (
-                    "w" if opponent else "b")
-                self.timed_out = {"status": "timeout", "winner": winner}
-                self.bot_pending = False
-                self.premove = None
-                self.version += 1  # invalidate any search already running
+            self.elapsed[color] += delta
+            self.game_elapsed += delta
 
     def _apply(self, move: chess.Move) -> bool:
-        # Undo restores the clock at the start of the move, including increments.
-        clock_before = dict(self.clocks)
+        # Time is cumulative even if a move is later undone: each side's time
+        # together still adds up to the real elapsed game stopwatch.
         self._tick()
         if self._finished() or not self.board.is_legal(move):
             return False
         mover = "w" if self.board.turn else "b"
         san = self.board.san(move)
-        elapsed = time.time() - self.last_move_started_at if self.clock_started else 0.0
+        elapsed = time.monotonic() - self.last_move_started_at
         self.board.push(move)
         self.actor_history.append("bot" if self.bot_enabled and
                                   mover == ("w" if self.bot_color else "b") else "user")
-        self.clock_history.append(clock_before)
-        self.clocks[mover] = max(0.0, self.clocks[mover] + self.increment)
         self.move_history.append(move)
         self.san_history.append(san)
         self.last_move = move
         self.last_move_ms = max(0.0, elapsed * 1000.0)
         self.move_times.append(round(self.last_move_ms, 1))
         self.started = True
-        self.last_tick = self.last_move_started_at = time.time()
+        self.last_tick = self.last_move_started_at = time.monotonic()
         self.version += 1
         # An offer remains open through the offerer's move, and is declined
         # when the opponent chooses a move instead of accepting.
@@ -222,32 +209,11 @@ class Session:
                 return move
         return None
 
-    def set_premove(self, frm: str, to: str, promotion: str = "q") -> bool:
-        if (not self.bot_enabled or not self.bot_pending or self.board.turn == self.you or
-                not self.settings["premove"] or self._finished()):
-            return False
-        try:
-            source, dest = chess.parse_square(frm), chess.parse_square(to)
-        except (ValueError, TypeError):
-            return False
-        piece = self.board.piece_at(source)
-        if (source == dest or piece is None or piece.color != self.you or
-                not isinstance(promotion, str) or promotion not in PROMO_MAP):
-            return False
-        self.premove = {"from": frm, "to": to, "promotion": promotion}
-        return True
-
-    def premove_uci(self):
-        if not self.premove:
-            return None
-        return (self.premove["from"] + self.premove["to"] +
-                (self.premove["promotion"] if self.premove["promotion"] != "q" else ""))
-
     def _schedule_bot(self) -> bool:
         if (self.bot_enabled and not self._finished() and
                 self.board.turn == self.bot_color and not self.bot_pending):
             self.bot_pending = True
-            self.bot_requested_at = time.time()
+            self.bot_requested_at = time.monotonic()
             token = self.version
             delay = self.think_delay
             threading.Thread(target=self._bot_async, args=(token, delay), daemon=True).start()
@@ -275,7 +241,7 @@ class Session:
         except Exception:
             app.logger.exception("Bot search failed; using fallback")
             try:
-                move = self.fallback.choose_move(board, 1, cancel=lambda: token != self.version)
+                move = self.fallback.choose_move(board, PLAY_LEVEL, cancel=lambda: token != self.version)
             except Exception:
                 app.logger.exception("Fallback search failed; using a legal move")
                 move = None
@@ -288,14 +254,9 @@ class Session:
                 move = next(iter(self.board.legal_moves), None)
             if move is not None and self._apply(move):
                 self.last_bot_move = move.uci()
-                reaction = max(elapsed, time.time() - started_at)
+                reaction = max(elapsed, time.monotonic() - started_at)
                 self.stats.record_bot_move(reaction, 0.0, move.uci())
             self.bot_pending = False
-            if self.premove and not self._finished() and self.board.turn == self.you:
-                queued, self.premove = self.premove, None
-                candidate = self._find_move(queued["from"], queued["to"], queued["promotion"])
-                if candidate is not None and self._apply(candidate):
-                    self.stats.record_user_move()
             self._schedule_bot()
 
     def apply_settings(self, data: dict):
@@ -303,33 +264,22 @@ class Session:
         with self.lock:
             options = cfg["settings"]
             self.settings.update(options)
-            if "difficulty" in cfg:
-                self.difficulty = cfg["difficulty"]
             if "think_delay" in cfg:
                 self.think_delay = cfg["think_delay"]
-            if "time_control" in cfg:
-                self.time_control = cfg["time_control"]
-                if not self.started:
-                    self.clocks = {"w": self.time_control, "b": self.time_control}
-            if "increment" in cfg:
-                self.increment = cfg["increment"]
             if "bot_enabled" in cfg:
                 self.bot_enabled = cfg["bot_enabled"]
-            if not self.bot_enabled or not self.settings["premove"]:
-                self.premove = None
-            if self.bot_pending and ("difficulty" in cfg or "bot_enabled" in cfg):
+            if self.bot_pending and "bot_enabled" in cfg:
                 self.bot_pending = False
                 self.version += 1
             self._schedule_bot()
 
-    def new(self, you_color="w", difficulty=3, time_control=600,
-            bot_enabled=True, think_delay=0.6, increment=0, settings=None):
+    def new(self, you_color="w", bot_enabled=True, think_delay=0,
+            settings=None):
         # Also validate direct callers: never leave a partially initialized game.
         if you_color not in ("w", "b"):
             raise ValueError("you_color must be w or b")
-        cfg = validated_config({"difficulty": difficulty, "time_control": time_control,
-                                "bot_enabled": bot_enabled, "think_delay": think_delay,
-                                "increment": increment, "settings": settings or {}})
+        cfg = validated_config({"bot_enabled": bot_enabled, "think_delay": think_delay,
+                                "settings": settings or {}})
         with self.lock:
             self.version += 1
             self.engine_epoch += 1
@@ -337,14 +287,12 @@ class Session:
             self.you_color = you_color
             self.you = you_color == "w"
             self.bot_color = not self.you
-            self.difficulty = cfg["difficulty"]
-            self.time_control = cfg["time_control"]
-            self.increment = cfg["increment"]
+            self.difficulty = PLAY_LEVEL
             self.think_delay = cfg["think_delay"]
             self.settings.update(cfg["settings"])
             self.settings["flip"] = you_color == "b"
-            self.clocks = {"w": self.time_control, "b": self.time_control}
-            self.clock_history: list[dict[str, float]] = []
+            self.elapsed = {"w": 0.0, "b": 0.0}
+            self.game_elapsed = 0.0
             self.move_history: list[chess.Move] = []
             self.actor_history: list[str] = []
             self.san_history: list[str] = []
@@ -352,16 +300,13 @@ class Session:
             self.last_move_ms = 0.0
             self.move_times: list[float] = []
             self.started = False
-            self.clock_started = True
-            self.last_tick = self.last_move_started_at = time.time()
+            self.last_tick = self.last_move_started_at = time.monotonic()
             self.bot_enabled = cfg["bot_enabled"]
             self.bot_pending = False
             self.bot_requested_at = None
             self.last_bot_move = None
             self.result_override = None
-            self.timed_out = None
             self.result_recorded = False
-            self.premove = None
             self.draw_offered_by = None
             self.last_draw_offer = None
             self.stats.new_game()
@@ -378,8 +323,6 @@ class Session:
             status, winner = "playing", None
             if self.result_override:
                 status, winner = self.result_override["status"], self.result_override["winner"]
-            elif self.timed_out:
-                status, winner = self.timed_out["status"], self.timed_out["winner"]
             elif outcome is not None:
                 status = outcome.termination.name.lower()
                 winner = ("w" if outcome.winner else "b") if outcome.winner is not None else None
@@ -389,6 +332,11 @@ class Session:
                 self.stats.record_result(status, winner, "w" if self.bot_color else "b")
                 self.result_recorded = True
             king = self.board.king(self.board.turn) if self.board.is_check() else None
+            last_by_color = {"w": None, "b": None}
+            first_is_white = self.board.root().turn == chess.WHITE
+            for index, milliseconds in enumerate(self.move_times):
+                color = "w" if (index % 2 == 0) == first_is_white else "b"
+                last_by_color[color] = milliseconds
             data = {
                 "fen": self.board.fen(),
                 "turn": "w" if self.board.turn else "b",
@@ -399,13 +347,13 @@ class Session:
                 "check": self.board.is_check(),
                 "check_square": chess.square_name(king) if king is not None else None,
                 "captured": captured_material(self.board),
-                "clocks": {key: round(value, 2) for key, value in self.clocks.items()},
+                "elapsed": {key: round(value, 2) for key, value in self.elapsed.items()},
+                "game_elapsed": round(self.game_elapsed, 2),
+                "last_move_by_color": last_by_color,
                 "you_color": self.you_color, "bot_color": "w" if self.bot_color else "b",
                 "difficulty": self.difficulty, "bot_enabled": self.bot_enabled,
                 "bot_thinking": self.bot_pending, "last_bot_move": self.last_bot_move,
                 "think_delay": self.think_delay, "started": self.started,
-                "clock_started": self.clock_started, "time_control": self.time_control,
-                "increment": self.increment, "premove": self.premove_uci(),
                 "draw_offer": self.last_draw_offer,
                 "draw_offered_by": self.draw_offered_by,
                 "last_move_ms": round(self.last_move_ms, 1),
@@ -587,10 +535,9 @@ def api_new():
         raise ValueError(f"Unknown game setting: {sorted(unknown)[0]}")
     cfg = validated_config({key: value for key, value in data.items()
                             if key != "you_color"})
-    return jsonify(g.game.new(data.get("you_color", "w"), cfg.get("difficulty", 3),
-                              cfg.get("time_control", 600), cfg.get("bot_enabled", True),
-                              cfg.get("think_delay", .6), cfg.get("increment", 0),
-                              cfg["settings"]))
+    return jsonify(g.game.new(data.get("you_color", "w"),
+                              cfg.get("bot_enabled", True),
+                              cfg.get("think_delay", 0), cfg["settings"]))
 
 
 @app.route("/api/move", methods=["POST"])
@@ -598,6 +545,8 @@ def api_move():
     data = get_json_object()
     game = g.game
     promotion = data.get("promotion", "q")
+    if "premove" in data:
+        raise ValueError("Queued moves are not supported; wait for your turn")
     if not isinstance(promotion, str) or promotion not in PROMO_MAP:
         raise ValueError("Invalid promotion piece")
     frm, to = data.get("from", ""), data.get("to", "")
@@ -605,33 +554,15 @@ def api_move():
         if game._finished():
             return jsonify({"error": "Game is over"}), 400
         if game.bot_enabled and game.board.turn != game.you:
-            game._tick()
-            if game._finished():
-                return jsonify({"error": "Game is over"}), 400
-            if data.get("premove") and game.set_premove(frm, to, promotion):
-                return jsonify(game.state({"premove_set": game.premove_uci()}))
-            return jsonify({"error": "Wait for the bot or queue a premove"}), 400
+            return jsonify({"error": "Wait for the bot to move"}), 400
         move = game._find_move(frm, to, promotion)
         if move is None:
             return jsonify({"error": "Illegal move"}), 400
         if not game._apply(move):
-            return jsonify({"error": "Time has run out"}), 400
+            return jsonify({"error": "Game is over or move is illegal"}), 400
         game.stats.record_user_move()
         game._schedule_bot()
         return jsonify(game.state({"your_move": move.uci()}))
-
-
-@app.route("/api/premove", methods=["POST"])
-def api_premove():
-    data, game = get_json_object(), g.game
-    with game.lock:
-        game._tick()
-        if data.get("cancel") is True:
-            game.premove = None
-        elif not game.set_premove(data.get("from", ""), data.get("to", ""),
-                                  data.get("promotion", "q")):
-            return jsonify({"error": "Cannot queue that premove"}), 400
-        return jsonify(game.state())
 
 
 @app.route("/api/hint", methods=["POST"])
@@ -670,26 +601,25 @@ def api_undo():
         count = (2 if game.bot_enabled and len(game.move_history) >= 2 and
                  game.actor_history[-1] == "bot" and
                  game.actor_history[-2] == "user" else 1)
+        game._tick()  # Account for time spent thinking before rewinding the board.
         undone_actors = []
         for _ in range(count):
             game.board.pop()
             game.move_history.pop()
             undone_actors.append(game.actor_history.pop())
             game.san_history.pop()
-            game.clocks = game.clock_history.pop()
             game.move_times.pop()
         game.stats.undo_moves(undone_actors)
         game.last_move = game.move_history[-1] if game.move_history else None
         game.last_move_ms = game.move_times[-1] if game.move_times else 0.0
-        game.last_tick = game.last_move_started_at = time.time()
+        game.last_tick = game.last_move_started_at = time.monotonic()
         game.started = bool(game.move_history)
-        game.result_override = game.timed_out = None
+        game.result_override = None
         if game.result_recorded:
             game.stats.undo_result()
         game.result_recorded = False
         game.bot_pending = False
         game.last_bot_move = None
-        game.premove = None
         game.draw_offered_by = game.last_draw_offer = None
         game.version += 1
         game.engine_epoch += 1
@@ -710,7 +640,6 @@ def api_resign():
             raise ValueError("Invalid resigning side")
         game.result_override = {"status": "resignation", "winner": "b" if color == "w" else "w"}
         game.bot_pending = False
-        game.premove = None
         game.version += 1
         return jsonify(game.state())
 
@@ -732,7 +661,6 @@ def api_claim_draw():
             return jsonify({"error": "No draw can be claimed yet"}), 400
         game.result_override = {"status": "claimed_draw", "winner": None}
         game.bot_pending = False
-        game.premove = None
         game.version += 1
         return jsonify(game.state())
 
@@ -752,7 +680,6 @@ def api_agree_draw():
         game.draw_offered_by = None
         game.last_draw_offer = "accepted"
         game.bot_pending = False
-        game.premove = None
         game.version += 1
         return jsonify(game.state())
 
@@ -760,9 +687,8 @@ def api_agree_draw():
 def bot_accepts_draw(game: Session) -> bool:
     meta = board_meta(game.board)
     advantage = meta["material_balance"] * (1 if game.bot_color else -1)
-    # Decline while ahead; accept a genuinely even late position or low clock.
-    remaining = game.clocks["w" if game.bot_color else "b"]
-    return advantage <= 0.5 and (meta["halfmove_clock"] >= 35 or remaining < 45)
+    # There is no time limit: a bot draw offer depends on the position only.
+    return advantage <= 0.5 and meta["halfmove_clock"] >= 35
 
 
 @app.route("/api/offer_draw", methods=["POST"])
@@ -782,7 +708,6 @@ def api_offer_draw():
         elif bot_accepts_draw(game):
             game.result_override = {"status": "agreed_draw", "winner": None}
             game.bot_pending = False
-            game.premove = None
             game.version += 1
             game.last_draw_offer = "accepted"
         else:
@@ -800,8 +725,7 @@ def api_abort():
             return jsonify({"error": "Game is over"}), 400
         if len(game.san_history) > 1:
             return jsonify({"error": "Only unstarted games can be aborted"}), 400
-        result = game.new(game.you_color, game.difficulty, game.time_control,
-                          game.bot_enabled, game.think_delay, game.increment,
+        result = game.new(game.you_color, game.bot_enabled, game.think_delay,
                           dict(game.settings))
         result["aborted"] = True
         return jsonify(result)

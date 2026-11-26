@@ -1,6 +1,6 @@
 import {pieceUri, PIECE_NAMES} from './pieces.js';
 import {START_FEN, fenToBoard, squareIndex, viewToSquare, squareToView,
-        colorOf, isPlaying, legalTargets, clockText, gameStatus,
+        colorOf, isPlaying, legalTargets, clockText, moveTimeText, gameStatus,
         coachMessage, animationParts} from './logic.js';
 
 const $ = id => document.getElementById(id);
@@ -22,8 +22,9 @@ let marked = new Set();
 let arrows = new Set();
 let drag = null;
 let rightStart = null;
-let localClocks = {w:600, b:600};
-let lastClockSync = performance.now();
+let localTime = {w:0, b:0, game:0};
+let lastTimeSync = performance.now();
+let freshStartNeeded = true; // Every page load starts at the standard initial position.
 let requestVersion = 0;
 let polling = false;
 let analyzing = false;
@@ -69,14 +70,9 @@ function connection(isOnline) {
 
 function localBoard() { return fenToBoard(state.fen); }
 function pieceAt(square) { return localBoard()[squareIndex(square)]; }
-function canPremove() {
-  return connected && isPlaying(state) && state.bot_enabled &&
-    state.turn !== state.you_color && state.bot_thinking && state.settings.premove;
-}
 function canSelect(piece) {
   if (!connected || !piece || !isPlaying(state) || moveSending) return false;
   const color = colorOf(piece);
-  if (canPremove()) return color === state.you_color;
   return color === state.turn && (!state.bot_enabled || color === state.you_color);
 }
 function userTurn() {
@@ -87,19 +83,13 @@ function userTurn() {
 function syncForm(first = false) {
   if (!state) return;
   const settings = state.settings || {};
-  if (first) {
-    $('side').value = state.you_color;
-    $('time').value = String(state.time_control);
-    $('increment').value = String(state.increment);
-  }
-  $('level').value = String(state.difficulty);
+  if (first) $('side').value = state.you_color;
   $('botEnabled').checked = state.bot_enabled;
   $('boardTheme').value = ['duo', 'blue', 'sand'].includes(settings.theme) ? settings.theme : 'duo';
   $('thinkDelay').value = String(state.think_delay);
   $('coords').checked = settings.coords;
   $('anim').checked = settings.animation;
   $('autoQueen').checked = settings.auto_queen;
-  $('premove').checked = settings.premove;
   $('arrows').checked = settings.arrows;
 }
 
@@ -108,7 +98,7 @@ function applyState(next, {force = false, animate = true, first = false} = {}) {
   const changed = force || !previous || previous.fen !== next.fen ||
     previous.last_move !== next.last_move || previous.status !== next.status ||
     JSON.stringify(previous.settings) !== JSON.stringify(next.settings) ||
-    previous.premove !== next.premove || previous.bot_enabled !== next.bot_enabled;
+    previous.bot_enabled !== next.bot_enabled;
   const oldRects = new Map();
   if (animate && previous && previous.fen !== next.fen && next.last_move &&
       (next.san?.length || 0) > (previous.san?.length || 0)) {
@@ -117,18 +107,14 @@ function applyState(next, {force = false, animate = true, first = false} = {}) {
       if (el) oldRects.set(from, el.getBoundingClientRect());
     }
   }
-  if (previous && previous.premove && !next.premove && previous.fen !== next.fen &&
-      (next.san?.length || 0) === (previous.san?.length || 0) + 1) {
-    notify('Your queued move was no longer legal.');
-  }
   if (previous && (next.san?.length || 0) < (previous.san?.length || 0)) {
     marked.clear(); arrows.clear();
   }
   state = next;
   flipped = !!next.settings?.flip;
   document.documentElement.dataset.theme = next.settings?.theme || 'duo';
-  localClocks = {...next.clocks};
-  lastClockSync = performance.now();
+  localTime = {...next.elapsed, game:next.game_elapsed};
+  lastTimeSync = performance.now();
   connection(true);
   if (changed) {
     if (previous && previous.fen !== next.fen) {
@@ -143,7 +129,6 @@ function applyState(next, {force = false, animate = true, first = false} = {}) {
     renderMoves();
     renderAnalysis();
   } else {
-    renderClocks();
     renderPlayers();
   }
   renderStatus();
@@ -159,9 +144,8 @@ function renderBoard() {
   const position = localBoard();
   const wasFocused = board.contains(document.activeElement);
   if (wasFocused) focusSquare = document.activeElement.dataset.square || focusSquare;
-  const legal = selected && !canPremove() ? new Set(legalTargets(state, selected)) : new Set();
+  const legal = selected ? new Set(legalTargets(state, selected)) : new Set();
   const last = state.last_move;
-  const premove = state.premove;
   const fragment = document.createDocumentFragment();
   for (let row = 0; row < 8; row++) for (let col = 0; col < 8; col++) {
     const square = viewToSquare(row, col, flipped);
@@ -178,8 +162,6 @@ function renderBoard() {
     if (hintSquare === square) tile.classList.add('hint');
     if (marked.has(square)) tile.classList.add('marked');
     if (state.check_square === square) tile.classList.add('check');
-    if (premove && premove.slice(0, 2) === square) tile.classList.add('premove-from');
-    if (premove && premove.slice(2, 4) === square) tile.classList.add('premove-to');
     if (canSelect(code)) tile.classList.add('own');
     const name = code ? `${colorOf(code) === 'w' ? 'white' : 'black'} ${PIECE_NAMES[code.toLowerCase()]}` : 'empty';
     tile.setAttribute('aria-label', `${square}, ${name}${state.check_square === square ? ', in check' : ''}`);
@@ -273,31 +255,38 @@ function renderPlayers() {
       }
     }
   }
-  renderClocks();
+  renderTimePanel();
 }
 
-function renderClocks() {
+function renderTimePanel() {
   if (!state) return;
-  for (const [position, color] of [['top', flipped ? 'w' : 'b'],
-                                    ['bottom', flipped ? 'b' : 'w']]) {
-    const element = $(`${position}Clock`);
-    const remaining = localClocks[color] ?? 0;
-    element.textContent = clockText(remaining);
-    element.classList.toggle('active', isPlaying(state) && state.turn === color);
-    element.classList.toggle('low', isPlaying(state) && state.turn === color && remaining < 20);
-    element.setAttribute('aria-label', `${color === 'w' ? 'White' : 'Black'} clock ${element.textContent}`);
+  const botColor = state.bot_color || (state.you_color === 'w' ? 'b' : 'w');
+  for (const [role, color, who] of [
+    ['bot', botColor, state.bot_enabled ? 'Bot' : 'Friend'],
+    ['your', state.you_color, 'You'],
+  ]) {
+    const colorName = color === 'w' ? 'White' : 'Black';
+    $(`${role}TimeLabel`).textContent = `${who} · ${colorName}`;
+    const time = clockText(localTime[color]);
+    $(`${role}Time`).textContent = time;
+    const last = state.last_move_by_color?.[color];
+    $(`${role}LastMove`).textContent = last == null ? 'Last move —' :
+      `Last move ${moveTimeText(last)}`;
+    const block = $(`${role}TimeBlock`);
+    block.classList.toggle('running', isPlaying(state) && state.turn === color);
+    block.setAttribute('aria-label', `${who}, ${colorName}: ${time} total; ${block.querySelector('small').textContent}`);
   }
+  $('gameTime').textContent = clockText(localTime.game);
 }
 
 function renderStatus() {
   if (!state) return;
   const label = connected ? gameStatus(state) : 'Server offline';
   $('statusTitle').textContent = label;
-  $('statusSubtitle').textContent = !connected ? 'Run python server.py to play.' :
-    state.premove ? `Queued: ${state.premove.toUpperCase()} · only plays if legal` :
+  $('statusSubtitle').textContent = !connected ? 'Run py main.py (Windows) or python3 main.py (Linux) to play.' :
     state.draw_offer === 'pending' && !state.bot_enabled ?
       `${state.draw_offered_by === 'w' ? 'White' : 'Black'} offered a draw · the other player can accept.` :
-    isPlaying(state) ? `${state.bot_enabled ? 'Against the bot' : 'Two-player board'} · level ${state.difficulty} · take your time.` :
+    isPlaying(state) ? `${state.bot_enabled ? 'Against the bot' : 'Two-player board'} · unlimited time.` :
     'Another game is just one click away.';
   const tag = $('matchTag');
   tag.textContent = !connected ? 'OFFLINE' : !isPlaying(state) ? 'GAME FINISHED' :
@@ -305,7 +294,7 @@ function renderStatus() {
   tag.classList.toggle('thinking', !!state.bot_thinking);
   tag.classList.toggle('finished', !isPlaying(state));
   const [title, description] = connected ? coachMessage(state) :
-    ['Ready when you are.', 'Start the server with python server.py, then refresh this page.'];
+    ['Ready when you are.', 'Start the server with py main.py or python3 main.py, then refresh.'];
   $('coachTitle').textContent = title; $('coachBody').textContent = description;
 }
 
@@ -356,10 +345,7 @@ function renderAnalysis() {
   $('fenText').textContent = state.fen;
   const result = analysis?.result;
   const centipawns = result?.eval_white;
-  $('evalFill').style.height = centipawns == null ? '50%' :
-    `${Math.min(96, Math.max(4, 50 + 46 * Math.tanh(centipawns / 450)))}%`;
   const formatted = centipawns == null ? '—' : `${centipawns > 0 ? '+' : ''}${(centipawns / 100).toFixed(1)}`;
-  $('evalValue').textContent = formatted;
   $('analysisEval').textContent = formatted;
   $('analysisState').textContent = !connected ? 'Start the server for analysis' :
     analysis?.thinking ? 'Looking at the position…' :
@@ -454,15 +440,13 @@ function promotionDialog(color, done) {
   options.querySelector('button')?.focus();
 }
 
-async function sendMove(from, to, piece, queued) {
+async function sendMove(from, to, piece) {
   if (moveSending) return;
   moveSending = true;
   const serial = ++requestVersion;
   try {
-    const next = await api(queued ? '/api/premove' : '/api/move',
-                           {from, to, promotion:piece});
+    const next = await api('/api/move', {from, to, promotion:piece});
     if (serial === requestVersion) applyState(next);
-    if (queued) notify('Move queued! It only plays if legal after the bot moves.');
   } catch (error) {
     notify(error.message);
     await refreshState();
@@ -470,27 +454,26 @@ async function sendMove(from, to, piece, queued) {
 }
 
 function attemptMove(from, to) {
-  if (!state || from === to) return;
-  const queued = canPremove();
+  if (!userTurn() || from === to) return;
   const code = pieceAt(from);
-  if (!queued && !legalTargets(state, from).includes(to)) {
+  if (!legalTargets(state, from).includes(to)) {
     notify('That move is not legal. Try another square.');
     return;
   }
   selected = null; hintSquare = null;
   renderBoard();
   const isPromotion = code?.toLowerCase() === 'p' &&
-    (queued ? to[1] === (state.you_color === 'w' ? '8' : '1') :
-              (state.legal || []).some(move => move.startsWith(from + to) && move.length === 5));
+    (state.legal || []).some(move => move.startsWith(from + to) && move.length === 5);
   if (isPromotion && !state.settings.auto_queen) {
-    promotionDialog(colorOf(code), choice => sendMove(from, to, choice, queued));
-  } else sendMove(from, to, 'q', queued);
+    promotionDialog(colorOf(code), choice => sendMove(from, to, choice));
+  } else sendMove(from, to, 'q');
 }
 
 function activateSquare(square, event) {
   if (!state || !connected || !isPlaying(state)) return;
   const code = pieceAt(square);
-  if (selected && square !== selected && (canPremove() || legalTargets(state, selected).includes(square))) {
+  if (selected && square !== selected && userTurn() &&
+      legalTargets(state, selected).includes(square)) {
     const from = selected;
     attemptMove(from, square);
     return;
@@ -569,18 +552,15 @@ board.addEventListener('keydown', event => {
 });
 
 function gamePayload() {
-  return {you_color:$('side').value, difficulty:Number($('level').value),
-          time_control:Number($('time').value), increment:Number($('increment').value),
-          bot_enabled:$('botEnabled').checked,
+  return {you_color:$('side').value, bot_enabled:$('botEnabled').checked,
           think_delay:Number($('thinkDelay').value),
           settings:{theme:$('boardTheme').value, coords:$('coords').checked,
                     animation:$('anim').checked, auto_queen:$('autoQueen').checked,
-                    premove:$('premove').checked, arrows:$('arrows').checked,
-                    highlight:'yellow', texture:false}};
+                    arrows:$('arrows').checked, highlight:'yellow', texture:false}};
 }
 
 async function action(path, body = {}) {
-  if (!connected) return notify('Server offline. Start python server.py first.');
+  if (!connected) return notify('Server offline. Start py main.py or python3 main.py first.');
   const serial = ++requestVersion;
   try {
     const next = await api(path, body);
@@ -604,12 +584,28 @@ async function newGame() {
   }
 }
 
+async function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await $('playArea').requestFullscreen();
+  } catch (_) {
+    notify('Fullscreen unavailable here. Try F11 in your browser.');
+  }
+}
+
+document.addEventListener('fullscreenchange', () => {
+  const active = document.fullscreenElement === $('playArea');
+  const button = $('btnFullscreen');
+  button.setAttribute('aria-pressed', String(active));
+  button.setAttribute('aria-label', active ? 'Exit fullscreen' : 'Enter fullscreen');
+  button.querySelector('span').textContent = active ? 'Exit fullscreen' : 'Fullscreen';
+});
+
 async function updateSettings() {
   if (!connected || !state) return;
   const payload = gamePayload();
-  await action('/api/settings', {difficulty:payload.difficulty,
-    bot_enabled:payload.bot_enabled, think_delay:payload.think_delay,
-    settings:{...payload.settings, flip:flipped}});
+  await action('/api/settings', {bot_enabled:payload.bot_enabled,
+    think_delay:payload.think_delay, settings:{...payload.settings, flip:flipped}});
 }
 
 async function hint() {
@@ -656,6 +652,7 @@ function downloadPGN() {
 
 $('btnNewTop').addEventListener('click', newGame);
 $('btnNewCard').addEventListener('click', newGame);
+$('btnFullscreen').addEventListener('click', toggleFullscreen);
 $('btnUndo').addEventListener('click', () => action('/api/undo'));
 $('btnHint').addEventListener('click', hint);
 $('btnFlip').addEventListener('click', () => {
@@ -688,8 +685,8 @@ $('btnResign').addEventListener('click', () => {
 });
 $('btnCopyFEN').addEventListener('click', () => copyText(state?.fen, 'FEN'));
 $('btnDownloadPGN').addEventListener('click', downloadPGN);
-for (const id of ['level', 'botEnabled', 'thinkDelay', 'boardTheme', 'coords',
-                  'anim', 'autoQueen', 'premove', 'arrows']) {
+for (const id of ['botEnabled', 'thinkDelay', 'boardTheme', 'coords',
+                  'anim', 'autoQueen', 'arrows']) {
   $(id).addEventListener('change', () => {
     if (id === 'boardTheme') document.documentElement.dataset.theme = $('boardTheme').value;
     if (id === 'coords' && state) {
@@ -705,7 +702,6 @@ window.addEventListener('keydown', event => {
   if (event.key === 'Escape') {
     if (!promotion.hidden) { promotion.hidden = true; return; }
     selected = hintSquare = null; marked.clear(); arrows.clear(); renderBoard();
-    if (state?.premove) action('/api/premove', {cancel:true});
     return;
   }
   if (!promotion.hidden || event.target.closest('.square')) return;
@@ -721,11 +717,12 @@ window.addEventListener('keydown', event => {
 
 setInterval(() => {
   if (!state || !connected) return;
-  const now = performance.now(), elapsed = Math.max(0, (now - lastClockSync) / 1000);
-  lastClockSync = now;
-  if (isPlaying(state) && state.clock_started) {
-    localClocks[state.turn] = Math.max(0, (localClocks[state.turn] || 0) - elapsed);
-    renderClocks();
+  const now = performance.now(), delta = Math.max(0, (now - lastTimeSync) / 1000);
+  lastTimeSync = now;
+  if (isPlaying(state)) {
+    localTime[state.turn] += delta;
+    localTime.game += delta;
+    renderTimePanel();
   }
 }, 200);
 
@@ -733,9 +730,11 @@ async function refreshState() {
   if (polling) return;
   polling = true;
   const serial = requestVersion;
+  const restarting = freshStartNeeded;
   try {
-    const next = await api('/api/state');
-    if (serial === requestVersion) applyState(next, {first:!connected});
+    const next = restarting ? await api('/api/new', {you_color:'w'}) : await api('/api/state');
+    if (restarting) freshStartNeeded = false;
+    if (serial === requestVersion) applyState(next, {first:!connected, force:restarting});
   } catch (_) {
     connection(false);
     if (!state) { state = offlineBoard(); renderBoard(); renderPlayers(); renderMoves(); renderStatus(); renderAnalysis(); }
@@ -744,7 +743,8 @@ async function refreshState() {
 }
 
 async function refreshAnalysis() {
-  if (!connected || !state || analyzing) return;
+  // Keep CPU available for the strongest playing search until analysis is asked for.
+  if (!connected || !state || analyzing || state.bot_thinking || !$('analysisPanel').open) return;
   analyzing = true;
   try {
     const answer = await api('/api/analysis');
@@ -755,13 +755,14 @@ async function refreshAnalysis() {
 
 function offlineBoard() {
   return {fen:START_FEN, turn:'w', legal:[], san:[], pgn:'', last_move:null,
-    status:'playing', check:false, captured:{w:[], b:[]}, clocks:{w:600, b:600},
-    you_color:'w', difficulty:3, bot_enabled:true, bot_thinking:false,
-    clock_started:false, time_control:600, increment:0, think_delay:.6,
-    settings:{theme:'duo',coords:true,animation:true,auto_queen:false,premove:true,arrows:true,flip:false},
+    status:'playing', check:false, captured:{w:[], b:[]}, elapsed:{w:0, b:0},
+    game_elapsed:0, last_move_by_color:{w:null,b:null}, you_color:'w', bot_color:'b',
+    difficulty:5, bot_enabled:true, bot_thinking:false, think_delay:0,
+    settings:{theme:'duo',coords:true,animation:true,auto_queen:false,arrows:true,flip:false},
     rules:{legal_count:20}};
 }
 
+$('analysisPanel').addEventListener('toggle', refreshAnalysis);
 refreshState();
 setInterval(refreshState, 650);
 setInterval(refreshAnalysis, 1500);
